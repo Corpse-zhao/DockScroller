@@ -48,6 +48,7 @@ static const void *kDSKeyKey = "ds_key";
 
 @interface DSRootListController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *table;
+- (void)ds_ensureTable;
 - (NSString *)ds_perPageText;
 - (NSString *)ds_iconSizeText;
 - (NSString *)ds_spacingText;
@@ -62,11 +63,50 @@ static const void *kDSKeyKey = "ds_key";
 
 @implementation DSRootListController
 
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = @"Dock 轮播";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+// 完全不调 super：PSListController 会在这里创建它自己的 table 并去加载 specifiers，
+// 我们的 view 不是 table，让它跑下去只会崩或空白。
+- (void)loadView {
+    UIView *root = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 320.0, 480.0)];
+    root.backgroundColor = [UIColor systemBackgroundColor];
+    root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.view = root;
+}
 
+- (void)viewDidLoad {
+    // 同样不调 super：PSListController 的 viewDidLoad 会去装配它自己的 table。
+    self.title = @"Dock 轮播";
+    [self ds_ensureTable];
+    DSPLog(@"[设置] 自绘面板已加载");
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    (void)animated;
+    [self ds_ensureTable];
+    [_table reloadData];   // 从子页面（应用选择）回来时刷新当前值显示
+}
+
+- (void)viewWillLayoutSubviews {
+    [self ds_ensureTable];
+    _table.frame = self.view.bounds;
+}
+
+// 明确告诉基类「没有 specifier」——基类若在内部取用也不会拿到脏数据
+- (NSArray *)specifiers {
+    return @[];
+}
+
+// 基类这两个方法会去操作「它自己的 table」，而我们的 view 不是 table。
+// 接管成刷新自绘表格，避免 unrecognized selector。
+- (void)reloadSpecifiers {
+    [_table reloadData];
+}
+
+- (void)reload {
+    [_table reloadData];
+}
+
+- (void)ds_ensureTable {
+    if (_table) return;
     _table = [[UITableView alloc] initWithFrame:self.view.bounds
                                           style:UITableViewStyleInsetGrouped];
     _table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -74,12 +114,6 @@ static const void *kDSKeyKey = "ds_key";
     _table.delegate = self;
     _table.backgroundColor = [UIColor systemBackgroundColor];
     [self.view addSubview:_table];
-    DSPLog(@"[设置] 自绘面板已加载");
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [_table reloadData];   // 从子页面（应用选择）回来时刷新当前值显示
 }
 
 #pragma mark - 表格结构

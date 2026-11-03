@@ -145,16 +145,23 @@ def check_panel_actions():
 
 
 def check_panel_is_selfdrawn():
-    """面板必须自绘，禁止回到 PSListController：OneSettings 等收纳插件不给
-    PSBundle 上下文，specifier 加载会整页空白且不报错。"""
+    """面板必须同时满足：
+       a) 继承真实的 PSListController —— OneSettings 会无保护地调 setSpecifier:，
+          纯 UIViewController 会被 unrecognized selector 打崩；
+       b) 不使用 specifier 机制 —— 收纳插件不装配 PSBundle 上下文，
+          loadSpecifiersFromPlistName: 找不到 plist，页面空白且不报错。
+       即：借 PS 的类壳子，界面完全自绘。"""
     header = strip_comments(read('prefs/DSRootListController.h'))
     code = strip_comments(read('prefs/DSRootListController.m'))
-    if re.search(r'PSListController|PSSpecifier|loadSpecifiersFromPlistName', header + code):
-        BAD.append('面板代码里出现 PSListController/PSSpecifier —— 收纳插件环境下会整页空白，必须纯 UIKit 自绘')
-    elif not re.search(r'UITableViewDataSource', code):
+
+    if not re.search(r'@interface\s+DSRootListController\s*:\s*PSListController', header):
+        BAD.append('面板没有继承 PSListController —— OneSettings 调 setSpecifier: 会直接把设置打崩')
+    elif re.search(r'loadSpecifiersFromPlistName|specifierWithProperties|\[PSSpecifier', header + code):
+        BAD.append('面板仍在用 specifier 机制 —— 收纳插件环境下会整页空白，必须纯 UIKit 自绘')
+    elif 'UITableViewDataSource' not in code:
         BAD.append('面板没有实现 UITableViewDataSource（自绘表格缺失）')
     else:
-        OK.append('设置面板为纯 UIKit 自绘（收纳插件兼容）')
+        OK.append('面板：继承 PS 类壳子但界面自绘（原生设置与收纳插件都能显示）')
 
 
 def check_arc_formats():
@@ -201,13 +208,13 @@ def check_no_auto_respring():
 
 
 def check_specifiers_override():
-    """历史检查：v0.1.0/v0.1.1 期间 PSListController 方案导致空白。
-    面板已改为自绘，这里只确认没有遗留 specifiers 方法。"""
+    """面板的 specifiers 只应返回空数组（告诉基类「没有 specifier」），
+    绝不能再去 plist 里加载 —— 那是收纳插件下空白的根源。"""
     code = strip_comments(read('prefs/DSRootListController.m'))
-    if re.search(r'-\s*\(NSArray\s*\*\)\s*specifiers\s*\{', code):
-        BAD.append('DSRootListController 还残留 specifiers override（应为自绘面板）')
+    if 'loadSpecifiersFromPlistName' in code:
+        BAD.append('DSRootListController 还在从 plist 加载 specifiers（收纳插件环境下会空白）')
     else:
-        OK.append('无 PSListController specifiers 残留')
+        OK.append('specifiers 不做 plist 加载（返回空数组，仅安抚基类）')
 
 
 def check_launch_is_async():
