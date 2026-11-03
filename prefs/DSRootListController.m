@@ -94,7 +94,22 @@
 
     id (*fn)(id, SEL, NSString *, id, SEL, SEL, Class, int, Class) =
         (id (*)(id, SEL, NSString *, id, SEL, SEL, Class, int, Class))objc_msgSend;
-    return fn((id)cls, factory, label, self, (SEL)0, (SEL)0, Nil, cell, Nil);
+    PSSpecifier *spec = fn((id)cls, factory, label, self, (SEL)0, (SEL)0, Nil, cell, Nil);
+    if (!spec) return nil;
+
+    // ⚠️ 关键：enabled 不显式给 YES，框架会按 NO 处理 —— 整页文字变灰、点不动。
+    //    这是「面板出来了但全是暗的」的唯一原因。
+    [spec setProperty:@YES forKey:@"enabled"];
+
+    // 再补一份 cell 字符串属性（plist 里的标准写法），和 cellType 双保险：
+    // 框架分派 cell 类时两个都可能读，缺一个就可能 fallback 成灰掉的静态样式。
+    NSString *cellName = nil;
+    if (cell == DS_CELL_GROUP) cellName = @"PSGroupCell";
+    else if (cell == DS_CELL_SWITCH) cellName = @"PSSwitchCell";
+    else if (cell == DS_CELL_BUTTON) cellName = @"PSButtonCell";
+    if (cellName) [spec setProperty:cellName forKey:@"cell"];
+
+    return spec;
 }
 
 - (PSSpecifier *)ds_groupWithTitle:(NSString *)title footer:(NSString *)footer {
@@ -122,10 +137,12 @@
     PSSpecifier *spec = [self ds_specWithLabel:title cell:DS_CELL_SWITCH];
     if (!spec) return nil;
 
+    // 三件套齐全，PSSwitchCell 才知道读哪个域、哪个键、默认值是什么
     [spec setProperty:key forKey:@"key"];
+    [spec setProperty:DSC_DOMAIN forKey:@"defaults"];
     [spec setProperty:[NSNumber numberWithBool:def] forKey:@"default"];
 
-    // 读写全部走我们自己的方法，不依赖 defaults 绑定
+    // 再挂上自己的读写方法，双保险（不同 iOS 版本方法名不一样）
     if ([spec respondsToSelector:@selector(setCellTarget:)]) {
         [spec setCellTarget:self];
     }
@@ -134,6 +151,14 @@
     }
     if ([spec respondsToSelector:@selector(setCellGetter:)]) {
         [spec setCellGetter:@selector(ds_getSwitch:)];
+    }
+    if ([spec respondsToSelector:NSSelectorFromString(@"setSetter:")]) {
+        ((void (*)(id, SEL, SEL))objc_msgSend)(spec, NSSelectorFromString(@"setSetter:"),
+                                              @selector(ds_setSwitch:specifier:));
+    }
+    if ([spec respondsToSelector:NSSelectorFromString(@"setGetter:")]) {
+        ((void (*)(id, SEL, SEL))objc_msgSend)(spec, NSSelectorFromString(@"setGetter:"),
+                                              @selector(ds_getSwitch:));
     }
     return spec;
 }
@@ -200,6 +225,21 @@
 
 #pragma mark - 开关读写
 
+// 框架渲染开关时会问这两个方法要值 / 存值。
+// 覆盖掉，读写就直接落到我们自己的域（同时会写 config.plist + 发 Darwin 通知）。
+- (id)readPreferenceValue:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (![key isKindOfClass:[NSString class]] || key.length == 0) return @YES;
+    return [NSNumber numberWithBool:DSPBool(key, YES)];
+}
+
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (![key isKindOfClass:[NSString class]] || key.length == 0) return;
+    DSPSetBool(key, [value boolValue]);
+    DSPLog(@"[设置] %@ = %@", key, [value boolValue] ? @"开" : @"关");
+}
+
 - (id)ds_getSwitch:(PSSpecifier *)spec {
     NSString *key = [spec propertyForKey:@"key"];
     if (key.length == 0) return @YES;
@@ -210,6 +250,7 @@
     NSString *key = [spec propertyForKey:@"key"];
     if (key.length == 0) return;
     DSPSetBool(key, [value boolValue]);
+    DSPLog(@"[设置] %@ = %@", key, [value boolValue] ? @"开" : @"关");
 }
 
 #pragma mark - 动作

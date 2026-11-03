@@ -260,6 +260,18 @@ def check_scroll_only_when_needed():
         OK.append('应用数 ≤ 每页数时禁用滑动（不会出现无意义闭环）')
 
 
+def check_panel_specifier_enabled():
+    """手工构造的 specifier 必须显式 enabled=YES，否则框架按 NO 处理，
+    表现就是「面板出来了但整页是暗的、点不动」。"""
+    code = strip_comments(read('prefs/DSRootListController.m'))
+    if 'forKey:@"enabled"' not in code:
+        BAD.append('specifier 没设 enabled=YES —— 面板会整页变灰、点不动')
+    elif 'forKey:@"key"' not in code:
+        BAD.append('开关 specifier 没设 key —— PSSwitchCell 不知道读写哪个配置项')
+    else:
+        OK.append('specifier 显式 enabled=YES 且开关带 key（条目可点、开关可拨）')
+
+
 def main():
     check_version()
     check_no_hook()
@@ -270,6 +282,7 @@ def main():
     del check_plist_actions_placeholder
     check_panel_actions()
     check_panel_is_selfdrawn()
+    check_panel_specifier_enabled()
     check_arc_formats()
     check_dock_entry_point()
     check_scroll_only_when_needed()
