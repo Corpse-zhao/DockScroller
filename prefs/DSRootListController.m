@@ -18,17 +18,37 @@
 #define DS_CELL_SWITCH  6
 #define DS_CELL_BUTTON  8
 
+// 调用栈摘要：只取最上面几帧，用来定位「到底是谁把开关改成了关」。
+// 之前几轮全靠猜，加上这个之后日志里就是证据。
+static NSString *DSShortStack(void) {
+    NSArray<NSString *> *symbols = [NSThread callStackSymbols];
+    if (symbols.count == 0) return @"(无栈)";
+    NSUInteger take = MIN((NSUInteger)5, symbols.count);
+    NSMutableArray<NSString *> *frames = [NSMutableArray array];
+    for (NSUInteger i = 0; i < take; i++) {
+        NSString *frame = symbols[i];
+        // 压缩成「类名 + 方法名」，否则日志一行几百字符没法看
+        NSRange plus = [frame rangeOfString:@" + "];
+        if (plus.location != NSNotFound) frame = [frame substringToIndex:plus.location];
+        NSRange space = [frame rangeOfString:@" " options:NSBackwardsSearch];
+        if (space.location != NSNotFound) frame = [frame substringFromIndex:space.location + 1];
+        [frames addObject:frame];
+    }
+    return [frames componentsJoinedByString:@" < "];
+}
+
 #pragma mark - 日志查看器
 
 @interface DSPLogViewController : UIViewController
 @property (nonatomic, copy) NSString *content;
+@property (nonatomic, copy) NSString *heading;   // 不设就是「诊断日志」
 @end
 
 @implementation DSPLogViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"诊断日志";
+    self.title = self.heading.length ? self.heading : @"诊断日志";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
     UITextView *textView = [[UITextView alloc] initWithFrame:self.view.bounds];
@@ -67,6 +87,7 @@
 - (void)pickIconSize;
 - (void)pickSpacing;
 - (void)showLog;
+- (void)showSelfCheck;
 - (void)respring;
 - (void)dsReload;
 - (void)dsAlert:(NSString *)title message:(NSString *)message;
@@ -194,6 +215,7 @@
                          footer:[NSString stringWithFormat:
                                  @"版本 %@ · 改完设置回到桌面约 1 秒内生效，无需重启桌面。", DSC_VERSION]]);
     add([self ds_switchWithTitle:@"显示状态小横条" key:DSC_KEY_BANNER defaultValue:YES]);
+    add([self ds_buttonWithTitle:@"状态自检（出问题先看这里）" action:@"showSelfCheck"]);
     add([self ds_buttonWithTitle:@"查看诊断日志" action:@"showLog"]);
     add([self ds_buttonWithTitle:@"重启桌面" action:@"respring"]);
 
@@ -259,9 +281,40 @@
     NSString *key = [self ds_keyForSpec:spec];
     BOOL on = [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
 
-    DSPSetBool(key, on);
+    // 只有面板真的在屏幕上，拨动才算用户操作。
+    // 收纳插件 / 框架在后台重建 cell 时可能把旧值「重放」回来，
+    // 这类非前台写入会表现为「回到桌面开关自己变回关」。
+    if (!self.viewIfLoaded.window) {
+        BOOL actual = DSPBool(key, YES);
+        [spec setProperty:[NSNumber numberWithBool:actual] forKey:@"value"];
+        DSPLog(@"[设置] 丢弃非前台写入 %@ = %@（实际 %@）← %@",
+               key, on ? @"开" : @"关", actual ? @"开" : @"关", DSShortStack());
+        return;
+    }
+
+    BOOL verified = YES;
+    if ([key isEqualToString:DSC_KEY_ENABLED]) {
+        verified = DSPSetEnabledFlag(on);
+    } else {
+        DSPSetBool(key, on);
+    }
+
+    // 落盘失败就立刻告诉用户，别让「拨了没反应」变成猜谜
+    if (!verified) {
+        BOOL actual = DSPBool(key, YES);
+        [spec setProperty:[NSNumber numberWithBool:actual] forKey:@"value"];
+        [self reloadSpecifiers];
+        [self dsAlert:@"保存失败"
+              message:[NSString stringWithFormat:
+                       @"没能写入状态文件，开关已回退。\n\n路径：%@\n当前读回：%@\n\n"
+                       @"请确认 /var/mobile/Documents/DockScroller 目录存在且可写"
+                       @"（可用 Filza 把它的权限改成 777）。",
+                       DSC_STATE_FILE, actual ? @"开" : @"关"]];
+        return;
+    }
+
     [spec setProperty:[NSNumber numberWithBool:on] forKey:@"value"];
-    DSPLog(@"[设置] 写 %@ = %@", key, on ? @"开" : @"关");
+    DSPLog(@"[设置] 写 %@ = %@ ← %@", key, on ? @"开" : @"关", DSShortStack());
 }
 
 - (id)ds_getSwitch:(PSSpecifier *)spec {
@@ -409,6 +462,86 @@
 - (void)respring {
     DSPLog(@"[设置] 用户点了重启桌面");
     DSPRespring();
+}
+
+#pragma mark - 状态自检
+
+// 把「面板认为的状态」和「磁盘上真实的状态」并排摊开。
+// 有了这一屏，就不用再靠猜：开关自己变关时，这里能直接看出是谁没落盘。
+- (void)showSelfCheck {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableString *report = [NSMutableString string];
+
+    BOOL enabled = DSPEnabledFlag(YES);
+    [report appendFormat:@"版本：%@\n", DSC_VERSION];
+    [report appendFormat:@"总开关读取：%@\n", enabled ? @"开" : @"关"];
+    [report appendFormat:@"state 原始内容：%@\n", DSPStateRaw()];
+    [report appendFormat:@"state 路径：%@\n", DSC_STATE_FILE];
+    [report appendFormat:@"state 存在：%@\n\n",
+        [fm fileExistsAtPath:DSC_STATE_FILE] ? @"是" : @"否"];
+
+    NSArray<NSString *> *apps = DSPApps();
+    [report appendFormat:@"config.plist：%@\n",
+        [fm fileExistsAtPath:DSC_CONFIG_FILE] ? @"存在" : @"不存在"];
+    [report appendFormat:@"已选应用：%lu 个\n", (unsigned long)apps.count];
+    if (apps.count) {
+        [report appendFormat:@"  %@\n", [apps componentsJoinedByString:@"\n  "]];
+    }
+    [report appendFormat:@"每页图标数：%ld\n", (long)DSPInt(DSC_KEY_PER_PAGE, DSC_DEFAULT_PER_PAGE)];
+    NSInteger iconSize = DSPInt(DSC_KEY_ICON_SIZE, DSC_SIZE_AUTO);
+    [report appendFormat:@"图标大小：%@\n", iconSize > 0
+        ? [NSString stringWithFormat:@"%ld pt", (long)iconSize] : @"跟随系统"];
+    NSInteger spacing = DSPInt(DSC_KEY_SPACING, DSC_SIZE_AUTO);
+    [report appendFormat:@"图标间距：%@\n", spacing >= 0
+        ? [NSString stringWithFormat:@"%ld pt", (long)spacing] : @"自动"];
+    [report appendFormat:@"状态横条：%@\n\n", DSPBool(DSC_KEY_BANNER, YES) ? @"开" : @"关"];
+
+    [report appendFormat:@"急救标记 DISABLED：%@\n",
+        [fm fileExistsAtPath:DSC_DISABLED_FILE] ? @"存在（插件被强制停用）" : @"无"];
+
+    NSString *logPath = DSPLogPath();
+    NSDictionary *attr = logPath.length ? [fm attributesOfItemAtPath:logPath error:NULL] : nil;
+    if (attr) {
+        [report appendFormat:@"日志：%@（%llu 字节）\n\n", logPath, [attr fileSize]];
+    } else {
+        [report appendFormat:@"日志：没有找到 —— 说明插件还没往这个目录写过东西\n\n"];
+    }
+
+    // 「结论」比数字更好读：把常见组合直接翻译成一句话
+    [report appendString:@"—— 判读 ——\n"];
+    if (!enabled) {
+        [report appendString:@"开关是关的：桌面不会出现轮播。先把它打开。\n"];
+    } else if (apps.count == 0) {
+        [report appendString:@"开关已开，但没选应用：按你的要求，此时 Dock 保持系统原样。\n"
+                            @"去「选择放进 Dock 的应用」勾几个，回桌面就有轮播了。\n"];
+    } else {
+        [report appendString:@"配置齐全：回桌面后 Dock 应变成轮播条，\n"
+                            @"左上角还会有一条小横条显示版本、开关、应用数。\n"
+                            @"看不到横条 = 插件没被注入，把这份自检发给我。\n"];
+    }
+
+    if (attr) {
+        NSString *tail = [NSString stringWithContentsOfFile:logPath
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL];
+        if (tail.length > 2000) tail = [tail substringFromIndex:tail.length - 2000];
+        if (tail.length) {
+            [report appendFormat:@"\n—— 日志尾部 ——\n%@", tail];
+        }
+    }
+
+    DSPLogViewController *viewer = [[DSPLogViewController alloc] init];
+    viewer.heading = @"状态自检";
+    viewer.content = report;
+
+    UINavigationController *nav = self.navigationController;
+    if (nav) {
+        [nav pushViewController:viewer animated:YES];
+    } else {
+        UINavigationController *wrapper =
+            [[UINavigationController alloc] initWithRootViewController:viewer];
+        [self presentViewController:wrapper animated:YES completion:nil];
+    }
 }
 
 #pragma mark - 辅助

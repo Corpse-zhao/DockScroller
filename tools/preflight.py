@@ -130,7 +130,7 @@ def check_plists():
 
 
 PANEL_ACTIONS = ['openAppPicker', 'fillAll', 'clearAll', 'pickPerPage',
-                 'pickIconSize', 'pickSpacing', 'showLog', 'respring']
+                 'pickIconSize', 'pickSpacing', 'showSelfCheck', 'showLog', 'respring']
 
 
 def check_panel_actions():
@@ -144,9 +144,57 @@ def check_panel_actions():
         OK.append('%d 个面板 action 全部有实现' % len(PANEL_ACTIONS))
 
 
+def check_hud_decoupled_from_switch():
+    """状态横条必须【不受总开关控制】，并且在「关掉 / 没选应用」的提前返回之前就更新。
+
+    原因：之前整页只有「Dock 有没有变成轮播」这一个现象可用，
+    「插件没被注入」和「插件跑了但开关是关的」在桌面上完全一样，
+    只能靠一轮轮试版本猜。横条脱钩之后，桌面上就能直接读出事实。
+    """
+    code = strip_comments(read('DSDockManager.m'))
+    problems = []
+    if 'ds_updateHUDInWindow' not in code:
+        problems.append('没有状态横条实现（ds_updateHUDInWindow）')
+
+    hud_at = code.find('ds_updateHUDInWindow:nil')
+    early_at = code.find('if (!enabled || apps.count == 0)')
+    if hud_at < 0:
+        problems.append('ds_tick 里没有调用状态横条（应该每 tick 都更新）')
+    elif early_at > 0 and hud_at > early_at:
+        problems.append('状态横条写在提前返回之后 —— 开关一关就看不到，失去诊断意义')
+
+    if problems:
+        BAD.extend(problems)
+    else:
+        OK.append('状态横条与总开关解耦（关掉时也能看出插件是否在跑）')
+
+
+def check_switch_write_verified():
+    """总开关的写入必须「写 + 回读自证」，失败要能反馈给用户。
+
+    以前的写法是写完就当成功，于是「拨了没落盘」只能表现为玄学：
+    开关自己弹回 / 回桌面又关掉。
+    """
+    code = strip_comments(read('prefs/DSPrefsCommon.m'))
+    panel = strip_comments(read('prefs/DSRootListController.m'))
+    problems = []
+    if not re.search(r'\bBOOL\s+DSPSetEnabledFlag\s*\(', code):
+        problems.append('DSPSetEnabledFlag 没有返回写入结果（无法知道有没有落盘）')
+    if 'DSPEnabledFlag(!on)' not in code:
+        problems.append('DSPSetEnabledFlag 写完没有回读自证')
+    if 'DSPSetEnabledFlag' not in panel:
+        problems.append('面板没走 state 文件写入（setPreferenceValue 里找不到 DSPSetEnabledFlag）')
+    if not re.search(r'viewIfLoaded\.window', panel):
+        problems.append('面板没有拦截非前台写入（后台重放旧值会把开关改掉）')
+
+    if problems:
+        BAD.extend(problems)
+    else:
+        OK.append('总开关：写 state 文件 + 回读自证 + 拦截非前台写入')
+
+
 def check_panel_is_selfdrawn():
     """设置面板的三条硬约束（三条都是真机崩出来的）：
-       a) 必须继承 PSListController —— OneSettings 会无保护调 setSpecifier:，
           纯 UIViewController 直接 unrecognized selector 崩；
        b) 不能重写 loadView —— 抢走基类的 table，基类任何回调都会把普通 UIView
           当 UITableView 用，两种入口全崩；
@@ -303,6 +351,8 @@ def main():
     check_panel_actions()
     check_panel_is_selfdrawn()
     check_panel_specifier_enabled()
+    check_switch_write_verified()
+    check_hud_decoupled_from_switch()
     check_config_read_order()
     check_arc_formats()
     check_dock_entry_point()

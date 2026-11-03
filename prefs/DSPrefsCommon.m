@@ -68,11 +68,76 @@ void DSPAppsSet(NSArray<NSString *> *apps) {
     DSPLog(@"[设置] 已保存 %lu 个应用", (unsigned long)safe.count);
 }
 
+// 总开关走独立的 state 文件（内容 "1"/"0"），与插件端完全同源。
+// 不走 NSUserDefaults/config.plist 是因为「设置」进程里 cfprefsd 可能拒绝落盘，
+// 导致「拨开 → 返回桌面 → 又变回关」。
+BOOL DSPEnabledFlag(BOOL def) {
+    NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
+                                             encoding:NSUTF8StringEncoding
+                                                error:NULL];
+    if (![raw isKindOfClass:[NSString class]]) return def;
+    raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (raw.length == 0) return def;
+    return [raw boolValue] || [raw isEqualToString:@"1"];
+}
+
+// 给「状态自检」用：把文件原始内容原样吐出来，不做任何解释
+NSString *DSPStateRaw(void) {
+    if (![NSFileManager.defaultManager fileExistsAtPath:DSC_STATE_FILE]) return @"(文件不存在)";
+    NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
+                                             encoding:NSUTF8StringEncoding
+                                                error:NULL];
+    if (![raw isKindOfClass:[NSString class]]) return @"(读不出来)";
+    return [NSString stringWithFormat:@"\"%@\"", raw];
+}
+
+BOOL DSPSetEnabledFlag(BOOL on) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:DSC_CONFIG_DIR
+  withIntermediateDirectories:YES
+                   attributes:nil
+                        error:NULL];
+    // 用户主动打开时，顺手清掉急救禁用标记，否则会出现
+    // 「开关是开的但插件不工作」的困惑
+    if (on) {
+        [fm removeItemAtPath:DSC_DISABLED_FILE error:NULL];
+        [fm removeItemAtPath:DSC_DISABLED_FILE2 error:NULL];
+    }
+
+    NSString *text = on ? @"1" : @"0";
+    NSError *err = nil;
+    BOOL ok = [text writeToFile:DSC_STATE_FILE
+                     atomically:YES
+                       encoding:NSUTF8StringEncoding
+                          error:&err];
+    if (!ok) {
+        // atomically:YES 是「写临时文件再 rename」，目录 meta 不可写时会整条失败。
+        // 直接覆写再试一次，很多沙盒只拦 rename 不拦 write。
+        err = nil;
+        ok = [text writeToFile:DSC_STATE_FILE
+                    atomically:NO
+                      encoding:NSUTF8StringEncoding
+                         error:&err];
+    }
+
+    // 写完立刻回读自证：只有「写成功 且 读回来等于想要的值」才算真的成功
+    BOOL now = DSPEnabledFlag(!on);
+    BOOL verified = ok && (now == on);
+    DSPLog(@"[设置] 写入总开关 %@ → %@（回读 %@）%@",
+           on ? @"开" : @"关", ok ? @"成功" : @"失败",
+           now ? @"开" : @"关",
+           verified ? @"" : (err.localizedDescription ?: @"回读不一致"));
+
+    if (verified) {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                            CFSTR(DSC_NOTIFY), NULL, NULL, true);
+    }
+    return verified;
+}
+
 // ⚠️ 读取顺序必须是「config.plist 优先，NSUserDefaults 兜底」。
 //    原因：Settings 进程里 initWithSuiteName: 受 cfprefsd 沙盒限制，写入未必落盘，
 //    而 config.plist 是普通文件 I/O，一定写得进去且立刻可读。
-//    反过来（defaults 优先）会出现「开关拨一下就弹回去」——
-//    因为读到的还是 defaults 里的旧值。
 NSInteger DSPInt(NSString *key, NSInteger def) {
     id v = DSPFileConfig()[key];
     if (v == nil) {
@@ -84,6 +149,8 @@ NSInteger DSPInt(NSString *key, NSInteger def) {
 }
 
 BOOL DSPBool(NSString *key, BOOL def) {
+    if ([key isEqualToString:DSC_KEY_ENABLED]) return DSPEnabledFlag(def);
+
     id v = DSPFileConfig()[key];
     if (v == nil) {
         NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
@@ -103,6 +170,13 @@ void DSPSetInt(NSString *key, NSInteger value) {
 }
 
 void DSPSetBool(NSString *key, BOOL value) {
+    if ([key isEqualToString:DSC_KEY_ENABLED]) {
+        if (DSPSetEnabledFlag(value)) {
+            DSPFileConfigWrite(key, @(value));   // 另存一份，方便 Filza 里查看
+        }
+        return;
+    }
+
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
     [defaults setBool:value forKey:key];
     [defaults synchronize];

@@ -12,6 +12,13 @@ if [ ! -f "$DIR/config.plist" ]; then
     chmod 666 "$DIR/config.plist" 2>/dev/null || true
 fi
 
+# 总开关状态文件：只在这份文件不存在时初始化成「开」，
+# 绝不覆盖用户已有的选择。
+if [ ! -f "$DIR/state" ]; then
+    printf '1' > "$DIR/state"
+fi
+chmod 666 "$DIR/state" 2>/dev/null || true
+
 echo ""
 echo "Dock 轮播已安装。"
 echo "生效方式二选一："

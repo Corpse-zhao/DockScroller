@@ -25,6 +25,10 @@ static NSArray<UIWindow *> *DSAllWindows(void);
 @interface DSDockManager ()
 - (void)ds_tick;
 - (void)ds_forceRefresh;
+- (void)ds_updateHUDInWindow:(UIWindow *)preferred
+                     enabled:(BOOL)enabled
+                    appCount:(NSUInteger)count
+                     perPage:(NSInteger)perPage;
 @end
 
 static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
@@ -114,11 +118,14 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
 
     NSArray<NSString *> *apps = enabled ? [self ds_apps] : @[];
 
-    // 关掉总开关、或没勾选任何应用 → 完全回到系统原生 Dock（覆盖层、横幅、隐藏的图标全部还原）
+    // 状态横条与总开关【解耦】：只由「显示状态小横条」这一项控制。
+    // 这样桌面上一眼就能分清「插件根本没跑」和「插件跑了但开关是关的 / 没选应用」，
+    // 不用再靠反复进设置面板猜。
+    [self ds_updateHUDInWindow:nil enabled:enabled appCount:apps.count perPage:perPage];
+
+    // 关掉总开关、或没勾选任何应用 → 完全回到系统原生 Dock（覆盖层、隐藏的图标全部还原）
     if (!enabled || apps.count == 0) {
         [self ds_teardown];
-        [_banner removeFromSuperview];
-        _bannerText = nil;
         return;
     }
 
@@ -182,9 +189,7 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
               (spacing >= 0.0 ? [NSString stringWithFormat:@"%.0f", spacing] : @"自动"));
     }
 
-    [self ds_attachBannerTo:window];
-    [self ds_updateBannerText:[NSString stringWithFormat:@"Dock 轮播 %@ · %lu 个应用 · 每页 %ld",
-                               DSCVersion(), (unsigned long)apps.count, (long)perPage]];
+    [self ds_updateHUDInWindow:window enabled:enabled appCount:apps.count perPage:perPage];
 }
 
 #pragma mark - 应用列表
@@ -396,6 +401,39 @@ static CGFloat DSProbeIconImageSize(UIView *root) {
 
 #pragma mark - 状态横幅
 
+// 状态横条的唯一内容来源：版本 / 总开关 / 应用数 / 每页数。
+// 它【不受总开关控制】—— 开关关掉时反而更需要它，否则「插件没跑」和
+// 「插件跑了但没开」在桌面上长得一模一样，只能靠猜。
+- (void)ds_updateHUDInWindow:(UIWindow *)preferred
+                     enabled:(BOOL)enabled
+                    appCount:(NSUInteger)count
+                     perPage:(NSInteger)perPage {
+    if (!DSCBool(DSC_KEY_BANNER, YES) || _bannerHiddenByUser) {
+        if (_banner.superview) [_banner removeFromSuperview];
+        _bannerText = nil;
+        return;
+    }
+
+    UIWindow *window = preferred;
+    if (!window || window.hidden || window.alpha < 0.01) {
+        window = nil;
+        for (UIWindow *candidate in DSAllWindows()) {
+            if (candidate.isKeyWindow && !candidate.hidden) { window = candidate; break; }
+        }
+        if (!window) {
+            for (UIWindow *candidate in DSAllWindows()) {
+                if (!candidate.hidden && candidate.alpha > 0.01) { window = candidate; break; }
+            }
+        }
+    }
+    if (!window) return;
+
+    [self ds_attachBannerTo:window];   // 先挂上去，再写文案（否则第一次写入会丢）
+    [self ds_updateBannerText:[NSString stringWithFormat:@"DS %@ · %@ · 应用 %lu · 每页 %ld",
+                               DSCVersion(), enabled ? @"开" : @"关",
+                               (unsigned long)count, (long)perPage]];
+}
+
 - (void)ds_attachBannerTo:(UIWindow *)window {
     BOOL want = DSCBool(DSC_KEY_BANNER, YES) && !_bannerHiddenByUser;
     if (!want) {
@@ -433,6 +471,14 @@ static CGFloat DSProbeIconImageSize(UIView *root) {
     if ([_bannerText isEqualToString:text]) return;
     _bannerText = [text copy];
     [_banner setTitle:text forState:UIControlStateNormal];
+
+    // 文案变了必须重新量宽度，否则横条还是上一次的宽度，字会被裁掉
+    [_banner sizeToFit];
+    CGRect frame = _banner.frame;
+    frame.size.width = MAX(frame.size.width + 16.0, 60.0);
+    frame.size.height = 22.0;
+    frame.origin = CGPointMake(10.0, 58.0);
+    _banner.frame = frame;
 }
 
 - (void)ds_bannerTapped {

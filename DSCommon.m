@@ -127,7 +127,25 @@ id DSCValue(NSString *key) {
     return DSConfigDict()[key];
 }
 
+// 总开关的唯一权威来源：state 文件（内容 "1"/"0"）。
+// 文件不存在 → 当作开。这样与设置面板的写入路径完全一致，不会出现
+// 「面板显示开、插件读到关」的错位。
+BOOL DSEnabledFlag(BOOL def) {
+    NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
+                                             encoding:NSUTF8StringEncoding
+                                                error:NULL];
+    if (![raw isKindOfClass:[NSString class]]) return def;
+    raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (raw.length == 0) return def;
+    return [raw boolValue] || [raw isEqualToString:@"1"];
+}
+
 BOOL DSCBool(NSString *key, BOOL def) {
+    // 总开关特判：先看急救文件，再只看 state 文件
+    if ([key isEqualToString:DSC_KEY_ENABLED]) {
+        if ([NSFileManager.defaultManager fileExistsAtPath:DSC_DISABLED_FILE]) return NO;
+        return DSEnabledFlag(YES);
+    }
     id v = DSCValue(key);
     if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
     return def;

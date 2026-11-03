@@ -22,6 +22,8 @@ BOOL DSJailbreakDisabled(void);
 id          DSCValue(NSString *key);
 BOOL        DSCBool(NSString *key, BOOL def);
 NSInteger   DSCInt(NSString *key, NSInteger def);
+// 总开关的权威读取（state 文件），tick 里直接用 DSCBool(DSC_KEY_ENABLED) 即可
+BOOL        DSEnabledFlag(BOOL def);
 NSString   *DSCConfigSource(void);
 
 // 应用清单（已安装的用户应用，按名称排序，元素为 @{id, name}）

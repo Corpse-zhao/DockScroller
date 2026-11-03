@@ -17,6 +17,13 @@ BOOL DSPBool(NSString *key, BOOL def);
 void DSPSetInt(NSString *key, NSInteger value);
 void DSPSetBool(NSString *key, BOOL value);
 
+// 总开关：独立的纯文本状态文件（内容 "1"/"0"）。
+// 返回 YES 表示「写进去了 + 回读一致」，调用方据此给用户明确反馈，
+// 而不是写完就当成功（以前就是这样才出现「拨开又自己关」的假象）。
+BOOL DSPEnabledFlag(BOOL def);
+BOOL DSPSetEnabledFlag(BOOL on);
+NSString *DSPStateRaw(void);   // state 文件原始内容，供「状态自检」展示
+
 NSArray<NSDictionary *> *DSPInstalledUserApps(void);
 UIImage *DSPIconForBundle(NSString *bundleID, CGFloat size);
 

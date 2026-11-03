@@ -9,7 +9,7 @@
 #ifndef DS_CONFIG_H
 #define DS_CONFIG_H
 
-#define DSC_VERSION   @"0.1.6"
+#define DSC_VERSION   @"0.1.7"
 #define DSC_DOMAIN    @"com.cz.dockscroller"
 #define DSC_NOTIFY    "com.cz.dockscroller.reload"
 
@@ -34,5 +34,11 @@
 #define DSC_LOG_FILE       @"/var/mobile/Documents/DockScroller/dock.log"
 #define DSC_DISABLED_FILE  @"/var/mobile/Documents/DockScroller/DISABLED"
 #define DSC_DISABLED_FILE2 @"/var/mobile/Library/Preferences/dockscroller.disabled"
+
+// 总开关的权威状态文件：内容 "1"=开 / "0"=关，文件不存在视为开。
+// 为什么不放在 config.plist / NSUserDefaults 里：设置进程里 NSUserDefaults
+// 写入受 cfprefsd 沙盒限制，未必落盘，表现为「开关拨完回桌面又变回关」。
+// 一个字符的纯文本文件没有这些中间层，写一个字符读一个字符，必然一致。
+#define DSC_STATE_FILE     @"/var/mobile/Documents/DockScroller/state"
 
 #endif /* DS_CONFIG_H */
