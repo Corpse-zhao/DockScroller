@@ -68,7 +68,6 @@ def check_version():
     m = re.search(r'^Version:\s*(\S+)\s*$', control, re.M)
     header = read('DSConfig.h')
     v = re.search(r'#define\s+DSC_VERSION\s+@"([^"]+)"', header)
-    root_plist = read('prefs/Resources/Root.plist')
     if not m or not v:
         BAD.append('版本号自检：control 或 DSConfig.h 里找不到版本号')
         return
@@ -77,8 +76,6 @@ def check_version():
     info = read('prefs/Resources/Info.plist')
     if v.group(1) not in info:
         BAD.append('prefs/Resources/Info.plist 里的版本号不是 %s' % v.group(1))
-    if v.group(1) not in root_plist:
-        BAD.append('Root.plist 页脚里的版本号不是 %s' % v.group(1))
     if not BAD:
         OK.append('版本号三处一致：%s' % v.group(1))
 
@@ -103,7 +100,7 @@ def check_no_key_window():
 
 
 def check_line_endings():
-    for path in ['control', 'layout/DEBIAN/postinst', 'prefs/Resources/Root.plist']:
+    for path in ['control', 'layout/DEBIAN/postinst']:
         data = read_bytes(path)
         if b'\r\n' in data:
             BAD.append('%s 是 CRLF —— dpkg-deb 会拒绝打包（Windows 常见坑）' % path)
@@ -111,7 +108,7 @@ def check_line_endings():
 
 
 def check_plists():
-    for path in ['prefs/Resources/Root.plist', 'prefs/Resources/Info.plist']:
+    for path in ['prefs/Resources/Info.plist']:
         try:
             with open(os.path.join(ROOT, path), 'rb') as f:
                 plistlib.load(f)
@@ -132,24 +129,32 @@ def check_plists():
     OK.append('plist 结构与括号配平')
 
 
-def check_plist_actions():
-    root = read('prefs/Resources/Root.plist')
+PANEL_ACTIONS = ['openAppPicker', 'fillAll', 'clearAll', 'pickPerPage',
+                 'pickIconSize', 'pickSpacing', 'showLog', 'respring']
+
+
+def check_panel_actions():
+    """自绘面板：每个 action 必须在 DSRootListController.m 里有对应方法实现。"""
     code = strip_comments(read('prefs/DSRootListController.m'))
-    actions = re.findall(r'<key>action</key>\s*<string>([^<]+)</string>', root)
-    missing = [a for a in actions if not re.search(r'-\s*\(void\)\s*' + re.escape(a) + r'\s*\{', code)]
+    missing = [a for a in PANEL_ACTIONS
+               if not re.search(r'-\s*\(void\)\s*' + re.escape(a) + r'\s*\{', code)]
     if missing:
-        BAD.append('Root.plist 里的 action 在 DSRootListController.m 里找不到实现：%s' % ', '.join(missing))
+        BAD.append('面板 action 在 DSRootListController.m 里找不到实现：%s' % ', '.join(missing))
     else:
-        OK.append('%d 个 action 全部有实现' % len(actions))
+        OK.append('%d 个面板 action 全部有实现' % len(PANEL_ACTIONS))
 
 
-def check_specifiers_ivar():
+def check_panel_is_selfdrawn():
+    """面板必须自绘，禁止回到 PSListController：OneSettings 等收纳插件不给
+    PSBundle 上下文，specifier 加载会整页空白且不报错。"""
     header = strip_comments(read('prefs/DSRootListController.h'))
-    block = re.search(r'@interface\s+PSListController\b[^{]*\{(.*?)\}', header, re.S)
-    if not block or not re.search(r'(?<![\w])_specifiers(?![\w])', block.group(1)):
-        BAD.append('PSListController 的 ivar 块里缺少 _specifiers —— 面板会整页空白且不报错')
+    code = strip_comments(read('prefs/DSRootListController.m'))
+    if re.search(r'PSListController|PSSpecifier|loadSpecifiersFromPlistName', header + code):
+        BAD.append('面板代码里出现 PSListController/PSSpecifier —— 收纳插件环境下会整页空白，必须纯 UIKit 自绘')
+    elif not re.search(r'UITableViewDataSource', code):
+        BAD.append('面板没有实现 UITableViewDataSource（自绘表格缺失）')
     else:
-        OK.append('PSListController 的 _specifiers ivar 已声明')
+        OK.append('设置面板为纯 UIKit 自绘（收纳插件兼容）')
 
 
 def check_arc_formats():
@@ -196,15 +201,13 @@ def check_no_auto_respring():
 
 
 def check_specifiers_override():
-    """PSListController 子类必须 override specifiers 并喂 loadSpecifiersFromPlistName，
-    否则 _specifiers 恒为 nil，表现为「能进面板但整页空白」。"""
+    """历史检查：v0.1.0/v0.1.1 期间 PSListController 方案导致空白。
+    面板已改为自绘，这里只确认没有遗留 specifiers 方法。"""
     code = strip_comments(read('prefs/DSRootListController.m'))
-    if not re.search(r'-\s*\(NSArray\s*\*\)\s*specifiers\s*\{', code):
-        BAD.append('DSRootListController 没 override specifiers —— 设置页会整页空白')
-    elif 'loadSpecifiersFromPlistName' not in code:
-        BAD.append('specifiers 里没调 loadSpecifiersFromPlistName —— Root.plist 不会被加载')
+    if re.search(r'-\s*\(NSArray\s*\*\)\s*specifiers\s*\{', code):
+        BAD.append('DSRootListController 还残留 specifiers override（应为自绘面板）')
     else:
-        OK.append('设置页 specifiers 已正确加载 Root.plist')
+        OK.append('无 PSListController specifiers 残留')
 
 
 def check_launch_is_async():
@@ -236,8 +239,10 @@ def main():
     check_no_key_window()
     check_line_endings()
     check_plists()
-    check_plist_actions()
-    check_specifiers_ivar()
+    check_plist_actions_placeholder = None  # 已由 check_panel_actions 取代
+    del check_plist_actions_placeholder
+    check_panel_actions()
+    check_panel_is_selfdrawn()
     check_arc_formats()
     check_dock_entry_point()
     check_no_auto_respring()
