@@ -289,12 +289,36 @@ static NSArray<UIWindow *> *DSAllWindows(void) {
 
 #pragma mark - 隐藏 / 恢复系统 Dock 图标
 
+// 量系统图标的真实渲染尺寸：优先钻到「图标图片本体」（*IconImageView），
+// 它的 bounds 就是图标边长，不受 SBIconView 的内边距 / label 区影响。
+// 直接量外层 IconView 会偏小（那里面有留白），是 v0.1.1 图标比系统小的原因。
+static CGFloat DSProbeIconImageSize(UIView *root) {
+    if (!root) return 0.0;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
+    NSUInteger guard = 0;
+    CGFloat best = 0.0;
+
+    while (queue.count > 0 && guard++ < 600) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (!view) continue;
+
+        NSString *className = NSStringFromClass([view class]);
+        if ([className containsString:@"IconImageView"]) {
+            CGFloat w = view.bounds.size.width;
+            if (w > best) best = w;
+        }
+        [queue addObjectsFromArray:view.subviews];
+    }
+    return best;
+}
+
 - (void)ds_hideSystemIconsIn:(UIView *)dock {
     if (!dock) return;
 
     // 同一批图标已经藏过且仍存活 → 跳过，避免每秒重复遍历 Dock 子树
     // （还没量到系统图标尺寸时先不跳过，量到了才进入免扫描状态）
-    if (_hiddenDock == dock && _hiddenIcons.count > 0 && _systemIconSize > 0.0) {
+    if (_hiddenDock == dock && _hiddenIcons.count > 0 && _systemIconSize >= 44.0) {
         for (UIView *view in _hiddenIcons) {
             if (view.window) return;
         }
@@ -314,11 +338,19 @@ static NSArray<UIWindow *> *DSAllWindows(void) {
         BOOL isIconView = [className containsString:@"IconView"] && view.bounds.size.width >= 26.0;
 
         if (isIconList || isIconView) {
-            // 顺手量一下系统图标的真实边长 —— 用户要求「图标大小默认跟系统一样」，
-            // 与其猜 58 还是 60，不如直接读系统自己的值。
-            if (isIconView && _systemIconSize <= 0.0 && view.bounds.size.width > 20.0) {
-                _systemIconSize = view.bounds.size.width;
-                DSLog(@"[Dock] 系统图标尺寸实测 %.1f pt", _systemIconSize);
+            // 量系统图标的真实尺寸 → 用户要求「图标大小默认跟系统一样」。
+            // 只在还没量到（或之前量的不可信）时才测，避免每秒重复遍历。
+            if (isIconView && _systemIconSize < 44.0) {
+                CGFloat probed = DSProbeIconImageSize(view);
+                if (probed < 44.0) {
+                    // 探测不到图片本体就退回 IconView 自身宽度（仍需过 44 的门槛）
+                    CGFloat own = view.bounds.size.width;
+                    probed = (own >= 44.0) ? own : 0.0;
+                }
+                if (probed >= 44.0) {
+                    _systemIconSize = probed;
+                    DSLog(@"[Dock] 系统图标尺寸实测 %.1f pt", _systemIconSize);
+                }
             }
             [targets addObject:view];
             continue;   // 命中即止：藏外层就不必再往下钻

@@ -10,6 +10,23 @@
 
 static char kDSBundleIDKey;
 
+// UIButton 的 legacy setImage: 会让 imageView 按「图片原始尺寸」布局
+// （我们传的是 120pt 的图），AspectFit 也约束不回来 → 显示尺寸失控。
+// 这个子类把 imageView 强制铺满按钮，图标大小就完全由 frame 决定。
+@interface DSIconButton : UIButton
+@end
+
+@implementation DSIconButton
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.imageView.frame = self.bounds;
+    self.imageView.contentMode = UIViewContentModeScaleAspectFit;
+    self.imageView.clipsToBounds = YES;
+}
+
+@end
+
 @interface DSDockOverlayView ()
 - (void)ds_rebuild;
 - (void)ds_normalizeOffset;
@@ -78,11 +95,19 @@ static char kDSBundleIDKey;
 #pragma mark - 构建内容
 
 // 一页 N 个 → 槽宽 = 可视宽 / N；图标大小默认取系统 Dock 的实测值，
-// 再被「用户设的大写」和「槽内不重叠」两者夹住。
+// 再被「用户设定的值」和「槽内不重叠」两者夹住。
 - (CGFloat)ds_resolvedIconSizeForSlot:(CGFloat)slot height:(CGFloat)height {
     CGFloat maxIcon = slot - (_userSpacing >= 0.0 ? _userSpacing : 6.0) - 2.0;
-    CGFloat icon = (_userIconSize > 0.0) ? _userIconSize : _systemIconSize;
-    if (icon <= 0.0) icon = 58.0;                 // 完全拿不到系统值时退回 iPhone 常见值
+
+    CGFloat icon = 0.0;
+    if (_userIconSize > 0.0) {
+        icon = _userIconSize;                       // 用户明确指定
+    } else if (_systemIconSize >= 44.0) {
+        icon = _systemIconSize;                     // 实测到系统值（太小视为脏数据）
+    } else {
+        icon = height - 24.0;                       // 兜底：按 Dock 高度推算（≈60pt）
+    }
+
     icon = MIN(icon, maxIcon);
     icon = MIN(icon, height - 6.0);
     return MAX(24.0, icon);
@@ -130,7 +155,7 @@ static char kDSBundleIDKey;
     for (NSInteger copy = 0; copy < copies; copy++) {
         for (NSUInteger i = 0; i < count; i++) {
             NSString *bid = _apps[i];
-            UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+            DSIconButton *button = (DSIconButton *)[DSIconButton buttonWithType:UIButtonTypeCustom];
             button.backgroundColor = [UIColor clearColor];
             button.adjustsImageWhenHighlighted = NO;
             [button setImage:DSIconForBundle(bid, 120.0) forState:UIControlStateNormal];
