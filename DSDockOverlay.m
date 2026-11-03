@@ -129,6 +129,7 @@ static char kDSBundleIDKey;
     [_scrollView addSubview:_strip];
 
     if (count == 0) {
+        _scrollView.scrollEnabled = NO;
         _scrollView.contentSize = _strip.frame.size;
         return;
     }
@@ -141,16 +142,29 @@ static char kDSBundleIDKey;
     CGFloat copyWidth = slot * (CGFloat)count;
     _copyWidth = copyWidth;
 
-    // 关键：副本数必须让「可视宽度 + 两侧各一份」都落在内容里，
-    // 否则内容比屏幕短时右滑会撞到硬边、接不回开头（闭环断裂）。
-    NSInteger copies = (NSInteger)ceil(width / MAX(copyWidth, 1.0)) + 3;
-    if (copies < 3) copies = 3;
-    if (copies > 60) copies = 60;
+    // 应用数 ≤ 每页图标数 → 一屏就能全部放下，用户要求「不能滑动」。
+    // 这时只铺一份、关掉手势，图标从左往右排（与系统 Dock 一致），
+    // 也避免出现「同一图标重复出现好几遍」的怪样子。
+    BOOL scrollable = (count > (NSUInteger)_perPage);
+    _scrollView.scrollEnabled = scrollable;
+    _scrollView.alwaysBounceHorizontal = scrollable;
+
+    NSInteger copies;
+    if (!scrollable) {
+        copies = 1;
+    } else {
+        // 关键：副本数必须让「可视宽度 + 两侧各一份」都落在内容里，
+        // 否则内容比屏幕短时右滑会撞到硬边、接不回开头（闭环断裂）。
+        copies = (NSInteger)ceil(width / MAX(copyWidth, 1.0)) + 3;
+        if (copies < 3) copies = 3;
+        if (copies > 60) copies = 60;
+    }
     _copies = copies;
 
     CGFloat totalWidth = copyWidth * (CGFloat)copies;
-    _strip.frame = CGRectMake(0, 0, totalWidth, height);
-    _scrollView.contentSize = CGSizeMake(totalWidth, height);
+    _strip.frame = CGRectMake(0, 0, MAX(totalWidth, width), height);
+    _scrollView.contentSize = scrollable ? CGSizeMake(totalWidth, height)
+                                         : CGSizeMake(width, height);
 
     for (NSInteger copy = 0; copy < copies; copy++) {
         for (NSUInteger i = 0; i < count; i++) {
@@ -169,10 +183,15 @@ static char kDSBundleIDKey;
         }
     }
 
-    // 起始位置放在第二份的开头：左右都还有充裕的余量可以立刻拖动
-    CGFloat maxOffset = MAX(0.0, totalWidth - width);
-    CGFloat startOffset = MIN(copyWidth, MAX(0.0, maxOffset));
-    _scrollView.contentOffset = CGPointMake(startOffset, 0.0);
+    // 可滚动时起始位置放在第二份的开头：左右都还有充裕余量可以立刻拖动。
+    // 不可滚动（应用数 ≤ 每页数）时干脆归零，图标从最左槽位开始排。
+    if (scrollable) {
+        CGFloat maxOffset = MAX(0.0, totalWidth - width);
+        CGFloat startOffset = MIN(copyWidth, MAX(0.0, maxOffset));
+        _scrollView.contentOffset = CGPointMake(startOffset, 0.0);
+    } else {
+        _scrollView.contentOffset = CGPointZero;
+    }
 
     [self setNeedsLayout];
 }
@@ -214,6 +233,7 @@ static char kDSBundleIDKey;
 #pragma mark - 闭环
 
 - (void)ds_normalizeOffset {
+    if (!_scrollView.scrollEnabled) return;   // 应用数 ≤ 每页数：本来就不该滑动
     CGFloat copyWidth = _copyWidth;
     if (copyWidth < 1.0) return;
 
@@ -252,6 +272,7 @@ static char kDSBundleIDKey;
 - (void)scrollViewWillEndDragging:(UIScrollView *)scrollView
                      withVelocity:(CGPoint)velocity
               targetContentOffset:(inout CGPoint *)targetContentOffset {
+    if (!_scrollView.scrollEnabled) return;
     if (_slot < 1.0) return;
     CGFloat x = (*targetContentOffset).x;
     CGFloat maxX = MAX(0.0, scrollView.contentSize.width - scrollView.bounds.size.width);
@@ -264,6 +285,7 @@ static char kDSBundleIDKey;
 }
 
 - (void)ds_snapAnimated:(BOOL)animated {
+    if (!_scrollView.scrollEnabled) return;   // 不可滚动时没有槽位需要吸附
     if (_slot < 1.0) return;
     CGFloat x = _scrollView.contentOffset.x;
     CGFloat snapped = round(x / _slot) * _slot;

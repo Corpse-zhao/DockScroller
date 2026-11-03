@@ -233,6 +233,17 @@ def check_launch_is_async():
         OK.append('启动应用走异步（无同步 XPC 死锁）')
 
 
+def check_scroll_only_when_needed():
+    """用户要求：所选应用数 ≤ 每页图标数时不能滑动（一屏放得下就没必要滚）。"""
+    code = strip_comments(read('DSDockOverlay.m'))
+    if 'scrollEnabled' not in code:
+        BAD.append('DSDockOverlay.m 没有按「应用数 ≤ 每页数」禁用滑动')
+    elif not re.search(r'count\s*>\s*\(NSUInteger\)_perPage', code):
+        BAD.append('缺少「应用数 > 每页数 才允许滑动」的判断')
+    else:
+        OK.append('应用数 ≤ 每页数时禁用滑动（不会出现无意义闭环）')
+
+
 def main():
     check_version()
     check_no_hook()
@@ -245,6 +256,7 @@ def main():
     check_panel_is_selfdrawn()
     check_arc_formats()
     check_dock_entry_point()
+    check_scroll_only_when_needed()
     check_no_auto_respring()
     check_specifiers_override()
     check_launch_is_async()
