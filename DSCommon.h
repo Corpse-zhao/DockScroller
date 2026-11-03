@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <unistd.h>
+#import <dlfcn.h>
 
 NSString *DSCVersion(void);
 

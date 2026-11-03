@@ -39,11 +39,15 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
     NSString *_signature;
     NSMutableArray<UIView *> *_hiddenIcons;
     NSTimer *_timer;
-    NSArray<NSString *> *_autoApps;
-    CFAbsoluteTime _autoAppsAt;
     UIButton *_banner;
+    NSString *_bannerText;
     BOOL _bannerHiddenByUser;
     BOOL _loggedDockClasses;
+    // 缓存：每秒全树扫描太重，命中过一次后就复用，失效才重扫
+    __weak UIView *_cachedDock;
+    __weak UIView *_hiddenDock;
+    // 系统 Dock 里图标的真实边长（默认图标大小就取它，保证「和系统一样」）
+    CGFloat _systemIconSize;
 }
 
 + (instancetype)shared {
@@ -103,19 +107,24 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
 - (void)ds_tick {
     BOOL enabled = DSCBool(DSC_KEY_ENABLED, YES);
     NSInteger perPage = DSCInt(DSC_KEY_PER_PAGE, DSC_DEFAULT_PER_PAGE);
-    if (perPage < 2) perPage = 2;
-    if (perPage > 6) perPage = 6;
+    if (perPage < DSC_MIN_PER_PAGE) perPage = DSC_MIN_PER_PAGE;
+    if (perPage > DSC_MAX_PER_PAGE) perPage = DSC_MAX_PER_PAGE;
+    CGFloat iconSize = (CGFloat)DSCInt(DSC_KEY_ICON_SIZE, DSC_SIZE_AUTO);
+    CGFloat spacing = (CGFloat)DSCInt(DSC_KEY_SPACING, DSC_SIZE_AUTO);
 
     NSArray<NSString *> *apps = enabled ? [self ds_apps] : @[];
-    UIView *dock = (enabled && apps.count > 0) ? [self ds_findDock] : nil;
 
-    if (!enabled || apps.count == 0 || !dock || !dock.window) {
+    // 关掉总开关、或没勾选任何应用 → 完全回到系统原生 Dock（覆盖层、横幅、隐藏的图标全部还原）
+    if (!enabled || apps.count == 0) {
         [self ds_teardown];
-        if (!enabled) {
-            [_banner removeFromSuperview];
-            return;
-        }
-        NSString *waitingText = [NSString stringWithFormat:@"Dock 轮播 %@ · 等待桌面 Dock", DSCVersion()];
+        [_banner removeFromSuperview];
+        _bannerText = nil;
+        return;
+    }
+
+    UIView *dock = [self ds_findDock];
+
+    if (!dock || !dock.window) {
         UIWindow *fallback = nil;
         for (UIWindow *candidate in DSAllWindows()) {
             if (candidate.isKeyWindow) { fallback = candidate; break; }
@@ -127,7 +136,7 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
         }
         if (fallback) {
             [self ds_attachBannerTo:fallback];   // 先挂上去，再写文案（否则第一次写入会丢）
-            [self ds_updateBannerText:waitingText];
+            [self ds_updateBannerText:[NSString stringWithFormat:@"Dock 轮播 %@ · 等待桌面 Dock", DSCVersion()]];
         }
         return;
     }
@@ -156,14 +165,21 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
 
     [self ds_hideSystemIconsIn:dock];
 
-    NSString *signature = [NSString stringWithFormat:@"%ld|%.1f|%@",
-                           (long)perPage, frame.size.width,
+    NSString *signature = [NSString stringWithFormat:@"%ld|%.1f|%.1f|%.1f|%.1f|%@",
+                           (long)perPage, frame.size.width, iconSize, spacing,
+                           _systemIconSize,
                            [apps componentsJoinedByString:@","]];
     if (![_signature isEqualToString:signature]) {
         _signature = signature;
-        [_overlay reloadWithApps:apps perPage:perPage];
-        DSLog(@"[Dock] 应用 %lu 个 / 每页 %ld / 闭环已就绪",
-              (unsigned long)apps.count, (long)perPage);
+        [_overlay reloadWithApps:apps
+                         perPage:perPage
+                        iconSize:iconSize
+                         spacing:spacing
+                  systemIconSize:_systemIconSize];
+        DSLog(@"[Dock] 应用 %lu 个 / 每页 %ld / 图标 %@ / 间距 %@",
+              (unsigned long)apps.count, (long)perPage,
+              (iconSize > 0.0 ? [NSString stringWithFormat:@"%.0f" , iconSize] : @"跟随系统"),
+              (spacing >= 0.0 ? [NSString stringWithFormat:@"%.0f", spacing] : @"自动"));
     }
 
     [self ds_attachBannerTo:window];
@@ -173,6 +189,9 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
 
 #pragma mark - 应用列表
 
+// ⚠️ 用户明确要求：没勾选任何应用时，Dock 必须保持系统原本模样。
+//    所以这里【不做】任何「自动填全部应用」的兜底 —— 空列表就返回空，
+//    上层据此完全卸载覆盖层、恢复系统图标透明度。
 - (NSArray<NSString *> *)ds_apps {
     id raw = DSCValue(DSC_KEY_APPS);
     NSMutableArray<NSString *> *list = [NSMutableArray array];
@@ -181,21 +200,7 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
             if ([item isKindOfClass:[NSString class]] && [item length] > 0) [list addObject:item];
         }
     }
-    if (list.count > 0) return list;
-
-    // 未选择应用时：自动使用全部用户应用（等价于「同款」默认体验）
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (!_autoApps || now - _autoAppsAt > 30.0) {
-        NSMutableArray<NSString *> *ids = [NSMutableArray array];
-        for (NSDictionary *item in DSInstalledUserApps()) {
-            NSString *bid = item[@"id"];
-            if ([bid isKindOfClass:[NSString class]] && bid.length) [ids addObject:bid];
-        }
-        _autoApps = [ids copy];
-        _autoAppsAt = now;
-        DSLog(@"[应用] 尚未配置 → 自动使用全部 %lu 个用户应用", (unsigned long)ids.count);
-    }
-    return _autoApps ?: @[];
+    return list;
 }
 
 #pragma mark - Dock 定位
@@ -225,6 +230,12 @@ static NSArray<UIWindow *> *DSAllWindows(void) {
 }
 
 - (UIView *)ds_findDock {
+    // ① 缓存命中：Dock 还活着、还在窗口里，就直接用，省掉一次全树遍历
+    UIView *cached = _cachedDock;
+    if (cached && cached.window && [cached isDescendantOfView:cached.window]) {
+        return cached;
+    }
+
     UIView *exact = nil;
     UIView *loose = nil;
     NSMutableArray<NSString *> *seenClasses = [NSMutableArray array];
@@ -271,13 +282,24 @@ static NSArray<UIWindow *> *DSAllWindows(void) {
         }
     }
 
-    return exact ?: loose;
+    UIView *result = exact ?: loose;
+    _cachedDock = result;
+    return result;
 }
 
 #pragma mark - 隐藏 / 恢复系统 Dock 图标
 
 - (void)ds_hideSystemIconsIn:(UIView *)dock {
     if (!dock) return;
+
+    // 同一批图标已经藏过且仍存活 → 跳过，避免每秒重复遍历 Dock 子树
+    // （还没量到系统图标尺寸时先不跳过，量到了才进入免扫描状态）
+    if (_hiddenDock == dock && _hiddenIcons.count > 0 && _systemIconSize > 0.0) {
+        for (UIView *view in _hiddenIcons) {
+            if (view.window) return;
+        }
+    }
+
     NSMutableArray<UIView *> *targets = [NSMutableArray array];
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:dock];
     NSUInteger guard = 0;
@@ -292,6 +314,12 @@ static NSArray<UIWindow *> *DSAllWindows(void) {
         BOOL isIconView = [className containsString:@"IconView"] && view.bounds.size.width >= 26.0;
 
         if (isIconList || isIconView) {
+            // 顺手量一下系统图标的真实边长 —— 用户要求「图标大小默认跟系统一样」，
+            // 与其猜 58 还是 60，不如直接读系统自己的值。
+            if (isIconView && _systemIconSize <= 0.0 && view.bounds.size.width > 20.0) {
+                _systemIconSize = view.bounds.size.width;
+                DSLog(@"[Dock] 系统图标尺寸实测 %.1f pt", _systemIconSize);
+            }
             [targets addObject:view];
             continue;   // 命中即止：藏外层就不必再往下钻
         }
@@ -305,6 +333,7 @@ static NSArray<UIWindow *> *DSAllWindows(void) {
         if (fabs(view.alpha) > 0.001) view.alpha = 0.0;
         if (![_hiddenIcons containsObject:view]) [_hiddenIcons addObject:view];
     }
+    _hiddenDock = dock;
 }
 
 - (void)ds_restoreSystemIcons {
@@ -329,6 +358,8 @@ static NSArray<UIWindow *> *DSAllWindows(void) {
         _signature = nil;
     }
     [self ds_restoreSystemIcons];
+    _hiddenDock = nil;
+    _cachedDock = nil;
 }
 
 #pragma mark - 状态横幅
@@ -366,6 +397,9 @@ static NSArray<UIWindow *> *DSAllWindows(void) {
 
 - (void)ds_updateBannerText:(NSString *)text {
     if (!_banner || text.length == 0) return;
+    // 每秒 tick 都会调到这里，文案没变就别重设（setTitle 会触发重新布局）
+    if ([_bannerText isEqualToString:text]) return;
+    _bannerText = [text copy];
     [_banner setTitle:text forState:UIControlStateNormal];
 }
 

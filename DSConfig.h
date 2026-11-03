@@ -9,16 +9,24 @@
 #ifndef DS_CONFIG_H
 #define DS_CONFIG_H
 
-#define DSC_VERSION   @"0.1.0"
+#define DSC_VERSION   @"0.1.1"
 #define DSC_DOMAIN    @"com.cz.dockscroller"
 #define DSC_NOTIFY    "com.cz.dockscroller.reload"
 
 #define DSC_KEY_ENABLED    @"enabled"
 #define DSC_KEY_APPS       @"apps"
 #define DSC_KEY_PER_PAGE   @"perPage"
+#define DSC_KEY_ICON_SIZE  @"iconSize"    // 负值 = 跟随系统 Dock 图标大小
+#define DSC_KEY_SPACING    @"spacing"     // 负值 = 自动（图标在槽内居中）
 #define DSC_KEY_BANNER     @"debugBanner"
 
+// 每页图标数：用户要求「最多五个」
 #define DSC_DEFAULT_PER_PAGE 4
+#define DSC_MIN_PER_PAGE 1
+#define DSC_MAX_PER_PAGE 5
+
+// 负值哨兵：表示「交给系统 / 自动」
+#define DSC_SIZE_AUTO (-1)
 
 // 共享配置目录：postinst 里预建并 chmod 777，方便 Filza 查看与两进程读写
 #define DSC_CONFIG_DIR     @"/var/mobile/Documents/DockScroller"

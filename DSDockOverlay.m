@@ -5,9 +5,17 @@
 
 #import "DSDockOverlay.h"
 #import "DSCommon.h"
+#import "DSConfig.h"
 #import <math.h>
 
 static char kDSBundleIDKey;
+
+@interface DSDockOverlayView ()
+- (void)ds_rebuild;
+- (void)ds_normalizeOffset;
+- (void)ds_snapAnimated:(BOOL)animated;
+- (CGFloat)ds_resolvedIconSizeForSlot:(CGFloat)slot height:(CGFloat)height;
+@end
 
 @implementation DSDockOverlayView {
     UIView *_strip;
@@ -17,6 +25,10 @@ static char kDSBundleIDKey;
     CGFloat _slot;
     CGFloat _copyWidth;
     NSInteger _copies;
+    CFAbsoluteTime _lastLaunchAt;
+    CGFloat _userIconSize;      // 负值 = 跟随系统
+    CGFloat _userSpacing;       // 负值 = 自动
+    CGFloat _systemIconSize;    // 从系统 Dock 实测到的图标边长
 }
 
 #pragma mark - 初始化
@@ -50,13 +62,31 @@ static char kDSBundleIDKey;
 
 #pragma mark - 对外
 
-- (void)reloadWithApps:(NSArray<NSString *> *)apps perPage:(NSInteger)perPage {
+- (void)reloadWithApps:(NSArray<NSString *> *)apps
+               perPage:(NSInteger)perPage
+              iconSize:(CGFloat)iconSize
+               spacing:(CGFloat)spacing
+         systemIconSize:(CGFloat)systemIconSize {
     _apps = [apps copy] ?: @[];
-    _perPage = MAX(1, perPage);
+    _perPage = MAX(DSC_MIN_PER_PAGE, MIN(perPage, DSC_MAX_PER_PAGE));
+    _userIconSize = iconSize;
+    _userSpacing = spacing;
+    _systemIconSize = systemIconSize;
     [self ds_rebuild];
 }
 
 #pragma mark - 构建内容
+
+// 一页 N 个 → 槽宽 = 可视宽 / N；图标大小默认取系统 Dock 的实测值，
+// 再被「用户设的大写」和「槽内不重叠」两者夹住。
+- (CGFloat)ds_resolvedIconSizeForSlot:(CGFloat)slot height:(CGFloat)height {
+    CGFloat maxIcon = slot - (_userSpacing >= 0.0 ? _userSpacing : 6.0) - 2.0;
+    CGFloat icon = (_userIconSize > 0.0) ? _userIconSize : _systemIconSize;
+    if (icon <= 0.0) icon = 58.0;                 // 完全拿不到系统值时退回 iPhone 常见值
+    icon = MIN(icon, maxIcon);
+    icon = MIN(icon, height - 6.0);
+    return MAX(24.0, icon);
+}
 
 - (void)ds_rebuild {
     [_buttons removeAllObjects];
@@ -78,7 +108,7 @@ static char kDSBundleIDKey;
         return;
     }
 
-    // 槽宽：左右各留 8pt 内边距，等分给每页的图标
+    // 槽宽：左右各留 8pt 内边距后等分（系统 Dock 图标区也是这样内缩的）
     CGFloat slot = (width - 16.0) / (CGFloat)_perPage;
     if (slot < 26.0) slot = 26.0;
     _slot = slot;
@@ -134,15 +164,14 @@ static char kDSBundleIDKey;
     if (width < 20.0 || height < 20.0) return;
 
     // 宽度变了（旋转 / 分屏 / 首次拿到真实 frame）→ 重算槽宽并重建
-    CGFloat expected = (width - 16.0) / (CGFloat)MAX(1, _perPage);
+    CGFloat expected = (width - 16.0) / (CGFloat)MAX(DSC_MIN_PER_PAGE, _perPage);
     if (expected < 26.0) expected = 26.0;
     if (fabs(expected - _slot) > 0.5 && _apps.count > 0) {
         [self ds_rebuild];
         return;
     }
 
-    CGFloat icon = MIN(_slot - 12.0, height - 18.0);
-    icon = MAX(34.0, MIN(icon, 84.0));
+    CGFloat icon = [self ds_resolvedIconSizeForSlot:_slot height:height];
     CGFloat y = (height - icon) / 2.0;
 
     NSUInteger count = _apps.count;
@@ -152,7 +181,7 @@ static char kDSBundleIDKey;
         UIButton *button = _buttons[idx];
         NSInteger copy = (NSInteger)(idx / count);
         NSInteger pos = (NSInteger)(idx % count);
-        CGFloat x = (CGFloat)copy * _copyWidth + (CGFloat)pos * _slot + (_slot - icon) / 2.0;
+        CGFloat x = (CGFloat)copy * _copyWidth + 8.0 + (CGFloat)pos * _slot + (_slot - icon) / 2.0;
         button.frame = CGRectMake(x, y, icon, icon);
     }
 }
@@ -222,6 +251,19 @@ static char kDSBundleIDKey;
 - (void)ds_iconTapped:(UIButton *)sender {
     NSString *bid = objc_getAssociatedObject(sender, &kDSBundleIDKey);
     if (bid.length == 0) return;
+
+    // 防连点：连点会堆叠多个启动请求，系统转场期间最容易卡
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (_lastLaunchAt > 0.0 && now - _lastLaunchAt < 1.2) return;
+    _lastLaunchAt = now;
+
+    // 给一点按下反馈：启动请求是异步的，转场前有短暂空档
+    sender.alpha = 0.45;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        sender.alpha = 1.0;
+    });
+
     DSLaunchBundle(bid);
 }
 

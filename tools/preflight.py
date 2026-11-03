@@ -182,6 +182,54 @@ def check_dock_entry_point():
     OK.append('闭环 / 吸附 / 卸载 关键实现齐全')
 
 
+def check_no_auto_respring():
+    """用户明确要求：安装时不要自动注销。postinst 里出现 killall SpringBoard 即视为回归。"""
+    script = read('layout/DEBIAN/postinst')
+    body = '\n'.join(line for line in script.splitlines()
+                     if not line.strip().startswith('#'))
+    if re.search(r'killall\s+(-?\w+\s+)*SpringBoard', body):
+        BAD.append('postinst 里有 killall SpringBoard —— 用户要求安装时【不得自动注销】')
+    elif re.search(r'\b(sbreload|respring)\b', body):
+        BAD.append('postinst 里出现 sbreload/respring —— 等价于自动注销，用户不要求')
+    else:
+        OK.append('postinst 不自动注销（是否重启桌面交给用户）')
+
+
+def check_specifiers_override():
+    """PSListController 子类必须 override specifiers 并喂 loadSpecifiersFromPlistName，
+    否则 _specifiers 恒为 nil，表现为「能进面板但整页空白」。"""
+    code = strip_comments(read('prefs/DSRootListController.m'))
+    if not re.search(r'-\s*\(NSArray\s*\*\)\s*specifiers\s*\{', code):
+        BAD.append('DSRootListController 没 override specifiers —— 设置页会整页空白')
+    elif 'loadSpecifiersFromPlistName' not in code:
+        BAD.append('specifiers 里没调 loadSpecifiersFromPlistName —— Root.plist 不会被加载')
+    else:
+        OK.append('设置页 specifiers 已正确加载 Root.plist')
+
+
+def check_launch_is_async():
+    """DSLaunchBundle 绝不能在主线程同步调 workspace：同步 XPC 会与 SpringBoard 自等死锁，
+    表现为「点图标整个桌面冻结」。必须走异步，或至少丢后台队列。"""
+    code = strip_comments(read('DSCommon.m'))
+    m = re.search(r'void\s+DSLaunchBundle\s*\(.*?\n\}\n', code, re.S)
+    if not m:
+        BAD.append('DSCommon.m 里找不到 DSLaunchBundle 实现')
+        return
+    body = m.group(0)
+    problems = []
+    if 'DSLaunchViaFrontBoard' not in body and 'dispatch_async' not in body:
+        problems.append('DSLaunchBundle 没有异步路径 —— 同步 XPC 会死锁，点击即全屏卡死')
+    # 直接在主线程同步调 workspace 是死锁根源
+    if re.search(r'fn\w*\(\s*ws\s*,', body) and 'dispatch_async' not in body:
+        problems.append('DSLaunchBundle 在主线程同步调用 workspace（死锁风险）')
+    if 'FBSSystemService' not in code:
+        problems.append('DSCommon.m 没有优先走 FBSSystemService 异步启动')
+    if problems:
+        BAD.extend(problems)
+    else:
+        OK.append('启动应用走异步（无同步 XPC 死锁）')
+
+
 def main():
     check_version()
     check_no_hook()
@@ -192,6 +240,9 @@ def main():
     check_specifiers_ivar()
     check_arc_formats()
     check_dock_entry_point()
+    check_no_auto_respring()
+    check_specifiers_override()
+    check_launch_is_async()
 
     for line in OK:
         print('  OK   ' + line)

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Dock 轮播 postinst
-# 预建共享配置目录并放开权限，使 SpringBoard 与「设置」进程都能读写
+# 只做目录与权限准备，【不自动注销】——是否重启桌面交给用户自己决定。
 DIR="/var/mobile/Documents/DockScroller"
 mkdir -p "$DIR"
 chmod 777 "$DIR"
@@ -12,6 +12,12 @@ if [ ! -f "$DIR/config.plist" ]; then
     chmod 666 "$DIR/config.plist" 2>/dev/null || true
 fi
 
-killall -9 SpringBoard 2>/dev/null || true
+echo ""
+echo "Dock 轮播已安装。"
+echo "生效方式二选一："
+echo "  · 手动重启桌面（推荐，立即生效）"
+echo "  · 什么都不做，下次重启设备后自动生效"
+echo "卸载/禁用：在 $DIR 放一个名为 DISABLED 的空文件即可。"
+echo ""
 
 exit 0

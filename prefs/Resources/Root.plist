@@ -32,7 +32,7 @@
 			<key>label</key>
 			<string>Dock 应用</string>
 			<key>footerText</key>
-			<string>不选任何应用时，Dock 会自动使用全部已安装应用。</string>
+			<string>不勾选任何应用时，Dock 保持系统原本模样，插件不做任何改动。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -63,6 +63,8 @@
 			<string>PSGroupCell</string>
 			<key>label</key>
 			<string>外观</string>
+			<key>footerText</key>
+			<string>图标大小默认取系统 Dock 的实测值，与原生完全一致；间距「自动」时图标在槽位内居中。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -71,6 +73,22 @@
 			<string>每页图标数</string>
 			<key>action</key>
 			<string>pickPerPage</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>图标大小</string>
+			<key>action</key>
+			<string>pickIconSize</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>图标间距</string>
+			<key>action</key>
+			<string>pickSpacing</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -90,7 +108,7 @@
 			<key>label</key>
 			<string>诊断</string>
 			<key>footerText</key>
-			<string>版本 0.1.0 · 改完设置回到桌面约 1 秒内生效，无需重启桌面。</string>
+			<string>版本 0.1.1 · 改完设置回到桌面约 1 秒内生效，无需重启桌面。</string>
 		</dict>
 		<dict>
 			<key>cell</key>

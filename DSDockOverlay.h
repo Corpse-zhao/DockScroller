@@ -15,6 +15,11 @@
 @property (nonatomic, strong, readonly) UIScrollView *scrollView;
 
 // 重新安装应用列表（同一签名重复调用会被上层拦住，不会反复重建）
-- (void)reloadWithApps:(NSArray<NSString *> *)apps perPage:(NSInteger)perPage;
+// iconSize / spacing 传负值表示「跟随系统 / 自动」
+- (void)reloadWithApps:(NSArray<NSString *> *)apps
+               perPage:(NSInteger)perPage
+              iconSize:(CGFloat)iconSize
+               spacing:(CGFloat)spacing
+         systemIconSize:(CGFloat)systemIconSize;
 
 @end

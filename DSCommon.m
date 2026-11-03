@@ -207,32 +207,108 @@ NSArray<NSDictionary *> *DSInstalledUserApps(void) {
 
 #pragma mark - 启动应用
 
+// ⚠️ 死锁警告（v0.1.1 修的就是这个）：
+//    -[LSApplicationWorkspace openApplicationWithBundleID:] 是【同步 XPC】。
+//    在 SpringBoard 主线程上调它，lsd 收到请求后要让 SpringBoard 自己去执行转场，
+//    而 SpringBoard 主线程正卡在等 lsd 返回 → 互等 → 全屏冻结，只能强制重启。
+//
+//    所以这里两件事一起做：
+//      1) 首选 FBSSystemService 的 openApplication:options:withResult: —— 天生异步（block 回调）；
+//      2) 兜底走 LSApplicationWorkspace，但一定丢到【后台串行队列】，
+//         主线程立刻返回，再也不给死锁留机会。
+
+static dispatch_queue_t DSLaunchQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.cz.dockscroller.launch", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+static id DSFrontBoardService(void) {
+    static Class cls = Nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // SpringBoard 进程里 FrontBoardServices 通常已加载，保险起见手动 dlopen
+        dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
+               RTLD_LAZY);
+        cls = objc_getClass("FBSSystemService");
+    });
+    if (!cls) return nil;
+    SEL sel = NSSelectorFromString(@"sharedService");
+    if (![cls respondsToSelector:sel]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(cls, sel);
+}
+
+// 兜底：同步 XPC，必须跑在后台队列上
+static void DSLaunchViaWorkspaceAsync(NSString *bundleID);
+
+// 第一优先：真正异步，不阻塞任何线程
+static BOOL DSLaunchViaFrontBoard(NSString *bundleID) {
+    id service = DSFrontBoardService();
+    if (!service) return NO;
+
+    SEL sel = NSSelectorFromString(@"openApplication:options:withResult:");
+    if (![service respondsToSelector:sel]) return NO;
+
+    typedef void (^DSOpenResultBlock)(NSError *);
+    void (*fn)(id, SEL, NSString *, NSDictionary *, DSOpenResultBlock) =
+        (void (*)(id, SEL, NSString *, NSDictionary *, DSOpenResultBlock))objc_msgSend;
+
+    // 空选项最稳：带未知 key 可能被 FrontBoard 校验拒绝，表现为「点了没反应」
+    fn(service, sel, bundleID, @{}, ^(NSError *error) {
+        if (error) {
+            DSLog(@"[启动] %@ FrontBoard 报错：%@ → 转后台 workspace 兜底", bundleID,
+                  error.localizedDescription ?: @"未知错误");
+            DSLaunchViaWorkspaceAsync(bundleID);
+        } else {
+            DSLog(@"[启动] %@ 已交给系统", bundleID);
+        }
+    });
+    DSLog(@"[启动] %@ → FrontBoard 异步已发起", bundleID);
+    return YES;
+}
+
+// 兜底：同步 XPC，必须跑在后台队列上
+static void DSLaunchViaWorkspaceAsync(NSString *bundleID) {
+    dispatch_async(DSLaunchQueue(), ^{
+        @autoreleasepool {
+            id ws = DSWorkspace();
+            if (!ws) {
+                DSLog(@"[启动] %@ 失败：拿不到 workspace", bundleID);
+                return;
+            }
+
+            SEL sel = NSSelectorFromString(@"openApplicationWithBundleID:");
+            if ([ws respondsToSelector:sel]) {
+                BOOL (*fn)(id, SEL, NSString *) = (BOOL (*)(id, SEL, NSString *))objc_msgSend;
+                BOOL ok = fn(ws, sel, bundleID);
+                DSLog(@"[启动] %@ → %@（后台线程）", bundleID, ok ? @"已发起" : @"被拒绝");
+                if (ok) return;
+            }
+
+            SEL sel2 = NSSelectorFromString(@"openApplicationWithBundleID:options:configuration:error:");
+            if ([ws respondsToSelector:sel2]) {
+                BOOL (*fn2)(id, SEL, NSString *, id, id, NSError **) =
+                    (BOOL (*)(id, SEL, NSString *, id, id, NSError **))objc_msgSend;
+                NSError *err = nil;
+                BOOL ok = fn2(ws, sel2, bundleID, nil, nil, &err);
+                DSLog(@"[启动] %@ 兜底 → %@ %@", bundleID, ok ? @"已发起" : @"失败",
+                      err.localizedDescription ?: @"");
+            }
+        }
+    });
+}
+
 void DSLaunchBundle(NSString *bundleID) {
     if (bundleID.length == 0) return;
 
-    id ws = DSWorkspace();
-    if (!ws) {
-        DSLog(@"[启动] %@ 失败：拿不到 workspace", bundleID);
-        return;
-    }
+    // 主线程只做「登记 + 立刻返回」，绝不同步等待任何 XPC
+    if (DSLaunchViaFrontBoard(bundleID)) return;
 
-    SEL sel = NSSelectorFromString(@"openApplicationWithBundleID:");
-    if ([ws respondsToSelector:sel]) {
-        BOOL (*fn)(id, SEL, NSString *) = (BOOL (*)(id, SEL, NSString *))objc_msgSend;
-        BOOL ok = fn(ws, sel, bundleID);
-        DSLog(@"[启动] %@ → %@", bundleID, ok ? @"已发起" : @"被拒绝");
-        if (ok) return;
-    }
-
-    // 兜底：新版 workspace 的 options 变体
-    SEL sel2 = NSSelectorFromString(@"openApplicationWithBundleID:options:configuration:error:");
-    if ([ws respondsToSelector:sel2]) {
-        BOOL (*fn2)(id, SEL, NSString *, id, id, NSError **) =
-            (BOOL (*)(id, SEL, NSString *, id, id, NSError **))objc_msgSend;
-        NSError *err = nil;
-        BOOL ok = fn2(ws, sel2, bundleID, nil, nil, &err);
-        DSLog(@"[启动] %@ 兜底路径 → %@ %@", bundleID, ok ? @"已发起" : @"失败", err.localizedDescription ?: @"");
-    }
+    DSLog(@"[启动] FrontBoard 不可用，改走后台 workspace 路径");
+    DSLaunchViaWorkspaceAsync(bundleID);
 }
 
 #pragma mark - 图标
