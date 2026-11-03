@@ -39,20 +39,17 @@ static void DSPFileConfigWrite(NSString *key, id value) {
 }
 
 NSArray<NSString *> *DSPApps(void) {
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
-    id raw = [defaults objectForKey:DSC_KEY_APPS];
     NSMutableArray<NSString *> *out = [NSMutableArray array];
+
+    // 同样是文件优先，理由见 DSPInt 上方注释
+    id raw = DSPFileConfig()[DSC_KEY_APPS];
+    if (![raw isKindOfClass:[NSArray class]]) {
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
+        raw = [defaults objectForKey:DSC_KEY_APPS];
+    }
     if ([raw isKindOfClass:[NSArray class]]) {
         for (id item in (NSArray *)raw) {
             if ([item isKindOfClass:[NSString class]] && [item length] > 0) [out addObject:item];
-        }
-    }
-    if (out.count == 0) {
-        id fileRaw = DSPFileConfig()[DSC_KEY_APPS];
-        if ([fileRaw isKindOfClass:[NSArray class]]) {
-            for (id item in (NSArray *)fileRaw) {
-                if ([item isKindOfClass:[NSString class]] && [item length] > 0) [out addObject:item];
-            }
         }
     }
     return out;
@@ -71,18 +68,27 @@ void DSPAppsSet(NSArray<NSString *> *apps) {
     DSPLog(@"[设置] 已保存 %lu 个应用", (unsigned long)safe.count);
 }
 
+// ⚠️ 读取顺序必须是「config.plist 优先，NSUserDefaults 兜底」。
+//    原因：Settings 进程里 initWithSuiteName: 受 cfprefsd 沙盒限制，写入未必落盘，
+//    而 config.plist 是普通文件 I/O，一定写得进去且立刻可读。
+//    反过来（defaults 优先）会出现「开关拨一下就弹回去」——
+//    因为读到的还是 defaults 里的旧值。
 NSInteger DSPInt(NSString *key, NSInteger def) {
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
-    id v = [defaults objectForKey:key];
-    if (v == nil) v = DSPFileConfig()[key];
+    id v = DSPFileConfig()[key];
+    if (v == nil) {
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
+        v = [defaults objectForKey:key];
+    }
     if ([v respondsToSelector:@selector(integerValue)]) return [v integerValue];
     return def;
 }
 
 BOOL DSPBool(NSString *key, BOOL def) {
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
-    id v = [defaults objectForKey:key];
-    if (v == nil) v = DSPFileConfig()[key];
+    id v = DSPFileConfig()[key];
+    if (v == nil) {
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
+        v = [defaults objectForKey:key];
+    }
     if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
     return def;
 }

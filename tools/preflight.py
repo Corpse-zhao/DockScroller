@@ -272,6 +272,26 @@ def check_panel_specifier_enabled():
         OK.append('specifier 显式 enabled=YES 且开关带 key（条目可点、开关可拨）')
 
 
+def check_config_read_order():
+    """Settings 进程里 NSUserDefaults(suiteName:) 写入未必落盘（cfprefsd 沙盒），
+    而 config.plist 用普通文件 I/O 一定写得进去。
+    所以读取必须「文件优先」——反过来会出现「开关拨一下就弹回去」。"""
+    prefs = strip_comments(read('prefs/DSPrefsCommon.m'))
+    m = re.search(r'BOOL\s+DSPBool\s*\(.*?\n\}\n', prefs, re.S)
+    if not m:
+        BAD.append('DSPrefsCommon.m 里找不到 DSPBool 实现')
+        return
+    body = m.group(0)
+    i_file = body.find('DSPFileConfig()')
+    i_ud = body.find('NSUserDefaults')
+    if i_file < 0:
+        BAD.append('DSPBool 没有读 config.plist')
+    elif i_ud >= 0 and i_ud < i_file:
+        BAD.append('DSPBool 先读 NSUserDefaults 再读 config.plist —— 开关会拨一下就弹回')
+    else:
+        OK.append('配置读取文件优先（开关不会弹回）')
+
+
 def main():
     check_version()
     check_no_hook()
@@ -283,6 +303,7 @@ def main():
     check_panel_actions()
     check_panel_is_selfdrawn()
     check_panel_specifier_enabled()
+    check_config_read_order()
     check_arc_formats()
     check_dock_entry_point()
     check_scroll_only_when_needed()

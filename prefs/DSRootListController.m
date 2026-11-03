@@ -142,6 +142,10 @@
     [spec setProperty:DSC_DOMAIN forKey:@"defaults"];
     [spec setProperty:[NSNumber numberWithBool:def] forKey:@"default"];
 
+    // 首次渲染时 PSSwitchCell 可能先读 value 属性再问 getter，
+    // 这里先塞一个当前真实值，避免第一帧显示成关、随后又被弹回
+    [spec setProperty:[NSNumber numberWithBool:DSPBool(key, def)] forKey:@"value"];
+
     // 再挂上自己的读写方法，双保险（不同 iOS 版本方法名不一样）
     if ([spec respondsToSelector:@selector(setCellTarget:)]) {
         [spec setCellTarget:self];
@@ -225,32 +229,47 @@
 
 #pragma mark - 开关读写
 
+// key 属性万一丢了，就按标题反推（标题是固定的，两个开关能可靠区分）
+- (NSString *)ds_keyForSpec:(PSSpecifier *)spec {
+    id key = [spec propertyForKey:@"key"];
+    if ([key isKindOfClass:[NSString class]] && [(NSString *)key length] > 0) return key;
+
+    NSString *name = nil;
+    if ([spec respondsToSelector:@selector(name)]) name = [spec name];
+    if ([name containsString:@"横条"]) return DSC_KEY_BANNER;
+    if ([name containsString:@"滑动"]) return DSC_KEY_ENABLED;
+    DSPLog(@"[设置] 警告：specifier 取不到 key（name=%@）", name);
+    return DSC_KEY_ENABLED;
+}
+
 // 框架渲染开关时会问这两个方法要值 / 存值。
-// 覆盖掉，读写就直接落到我们自己的域（同时会写 config.plist + 发 Darwin 通知）。
+// 覆盖掉，读写就直接落到我们自己的配置（config.plist 优先，见 DSPrefsCommon 注释）。
 - (id)readPreferenceValue:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (![key isKindOfClass:[NSString class]] || key.length == 0) return @YES;
-    return [NSNumber numberWithBool:DSPBool(key, YES)];
+    NSString *key = [self ds_keyForSpec:spec];
+    NSNumber *value = [NSNumber numberWithBool:DSPBool(key, YES)];
+
+    // 有些版本的 PSSwitchCell 会缓存 specifier 的 value 属性，
+    // 不同步一份的话拨动后会被旧值弹回去
+    [spec setProperty:value forKey:@"value"];
+    DSPLog(@"[设置] 读 %@ = %@", key, value.boolValue ? @"开" : @"关");
+    return value;
 }
 
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (![key isKindOfClass:[NSString class]] || key.length == 0) return;
-    DSPSetBool(key, [value boolValue]);
-    DSPLog(@"[设置] %@ = %@", key, [value boolValue] ? @"开" : @"关");
+    NSString *key = [self ds_keyForSpec:spec];
+    BOOL on = [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
+
+    DSPSetBool(key, on);
+    [spec setProperty:[NSNumber numberWithBool:on] forKey:@"value"];
+    DSPLog(@"[设置] 写 %@ = %@", key, on ? @"开" : @"关");
 }
 
 - (id)ds_getSwitch:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (key.length == 0) return @YES;
-    return [NSNumber numberWithBool:DSPBool(key, YES)];
+    return [self readPreferenceValue:spec];
 }
 
 - (void)ds_setSwitch:(id)value specifier:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (key.length == 0) return;
-    DSPSetBool(key, [value boolValue]);
-    DSPLog(@"[设置] %@ = %@", key, [value boolValue] ? @"开" : @"关");
+    [self setPreferenceValue:value specifier:spec];
 }
 
 #pragma mark - 动作

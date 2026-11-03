@@ -103,7 +103,8 @@ static NSDictionary *DSConfigDict(void) {
 
     NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
     if (ud) {
-        for (NSString *key in @[ DSC_KEY_ENABLED, DSC_KEY_APPS, DSC_KEY_PER_PAGE, DSC_KEY_BANNER ]) {
+        for (NSString *key in @[ DSC_KEY_ENABLED, DSC_KEY_APPS, DSC_KEY_PER_PAGE,
+                                 DSC_KEY_ICON_SIZE, DSC_KEY_SPACING, DSC_KEY_BANNER ]) {
             id v = [ud objectForKey:key];
             if (v) merged[key] = v;
         }
