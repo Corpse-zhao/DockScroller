@@ -1,0 +1,17 @@
+#!/bin/bash
+# Dock 轮播 postinst
+# 预建共享配置目录并放开权限，使 SpringBoard 与「设置」进程都能读写
+DIR="/var/mobile/Documents/DockScroller"
+mkdir -p "$DIR"
+chmod 777 "$DIR"
+chown mobile:mobile "$DIR" 2>/dev/null || true
+
+# 首次安装给一份空配置，避免读到半截状态
+if [ ! -f "$DIR/config.plist" ]; then
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict/></plist>\n' > "$DIR/config.plist"
+    chmod 666 "$DIR/config.plist" 2>/dev/null || true
+fi
+
+killall -9 SpringBoard 2>/dev/null || true
+
+exit 0

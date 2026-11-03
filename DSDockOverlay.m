@@ -1,0 +1,236 @@
+//
+//  DSDockOverlay.m
+//  DockScroller —— 闭环轮播 Dock 视图
+//
+
+#import "DSDockOverlay.h"
+#import "DSCommon.h"
+#import <math.h>
+
+static char kDSBundleIDKey;
+
+@implementation DSDockOverlayView {
+    UIView *_strip;
+    NSMutableArray<UIButton *> *_buttons;
+    NSArray<NSString *> *_apps;
+    NSInteger _perPage;
+    CGFloat _slot;
+    CGFloat _copyWidth;
+    NSInteger _copies;
+}
+
+#pragma mark - 初始化
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.backgroundColor = [UIColor clearColor];
+    self.opaque = NO;
+    self.clipsToBounds = NO;
+    _buttons = [NSMutableArray array];
+    _perPage = 4;
+    _slot = 0.0;
+    _copyWidth = 1.0;
+    _copies = 3;
+
+    _scrollView = [[UIScrollView alloc] initWithFrame:self.bounds];
+    _scrollView.backgroundColor = [UIColor clearColor];
+    _scrollView.showsHorizontalScrollIndicator = NO;
+    _scrollView.showsVerticalScrollIndicator = NO;
+    _scrollView.alwaysBounceHorizontal = YES;
+    _scrollView.decelerationRate = UIScrollViewDecelerationRateFast;
+    _scrollView.clipsToBounds = YES;
+    _scrollView.delegate = self;
+    _scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self addSubview:_scrollView];
+
+    return self;
+}
+
+#pragma mark - 对外
+
+- (void)reloadWithApps:(NSArray<NSString *> *)apps perPage:(NSInteger)perPage {
+    _apps = [apps copy] ?: @[];
+    _perPage = MAX(1, perPage);
+    [self ds_rebuild];
+}
+
+#pragma mark - 构建内容
+
+- (void)ds_rebuild {
+    [_buttons removeAllObjects];
+    [_strip removeFromSuperview];
+    _strip = nil;
+
+    CGRect bounds = self.bounds;
+    CGFloat width = bounds.size.width;
+    CGFloat height = bounds.size.height;
+    if (width < 20.0 || height < 20.0) return;
+
+    NSUInteger count = _apps.count;
+    _strip = [[UIView alloc] initWithFrame:CGRectMake(0, 0, MAX(width, 1.0), MAX(height, 1.0))];
+    _strip.backgroundColor = [UIColor clearColor];
+    [_scrollView addSubview:_strip];
+
+    if (count == 0) {
+        _scrollView.contentSize = _strip.frame.size;
+        return;
+    }
+
+    // 槽宽：左右各留 8pt 内边距，等分给每页的图标
+    CGFloat slot = (width - 16.0) / (CGFloat)_perPage;
+    if (slot < 26.0) slot = 26.0;
+    _slot = slot;
+
+    CGFloat copyWidth = slot * (CGFloat)count;
+    _copyWidth = copyWidth;
+
+    // 关键：副本数必须让「可视宽度 + 两侧各一份」都落在内容里，
+    // 否则内容比屏幕短时右滑会撞到硬边、接不回开头（闭环断裂）。
+    NSInteger copies = (NSInteger)ceil(width / MAX(copyWidth, 1.0)) + 3;
+    if (copies < 3) copies = 3;
+    if (copies > 60) copies = 60;
+    _copies = copies;
+
+    CGFloat totalWidth = copyWidth * (CGFloat)copies;
+    _strip.frame = CGRectMake(0, 0, totalWidth, height);
+    _scrollView.contentSize = CGSizeMake(totalWidth, height);
+
+    for (NSInteger copy = 0; copy < copies; copy++) {
+        for (NSUInteger i = 0; i < count; i++) {
+            NSString *bid = _apps[i];
+            UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+            button.backgroundColor = [UIColor clearColor];
+            button.adjustsImageWhenHighlighted = NO;
+            [button setImage:DSIconForBundle(bid, 120.0) forState:UIControlStateNormal];
+            button.imageView.contentMode = UIViewContentModeScaleAspectFit;
+            button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+            button.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+            objc_setAssociatedObject(button, &kDSBundleIDKey, bid, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            [button addTarget:self action:@selector(ds_iconTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [_strip addSubview:button];
+            [_buttons addObject:button];
+        }
+    }
+
+    // 起始位置放在第二份的开头：左右都还有充裕的余量可以立刻拖动
+    CGFloat maxOffset = MAX(0.0, totalWidth - width);
+    CGFloat startOffset = MIN(copyWidth, MAX(0.0, maxOffset));
+    _scrollView.contentOffset = CGPointMake(startOffset, 0.0);
+
+    [self setNeedsLayout];
+}
+
+#pragma mark - 布局
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    self.scrollView.frame = self.bounds;
+
+    CGFloat width = self.bounds.size.width;
+    CGFloat height = self.bounds.size.height;
+    if (width < 20.0 || height < 20.0) return;
+
+    // 宽度变了（旋转 / 分屏 / 首次拿到真实 frame）→ 重算槽宽并重建
+    CGFloat expected = (width - 16.0) / (CGFloat)MAX(1, _perPage);
+    if (expected < 26.0) expected = 26.0;
+    if (fabs(expected - _slot) > 0.5 && _apps.count > 0) {
+        [self ds_rebuild];
+        return;
+    }
+
+    CGFloat icon = MIN(_slot - 12.0, height - 18.0);
+    icon = MAX(34.0, MIN(icon, 84.0));
+    CGFloat y = (height - icon) / 2.0;
+
+    NSUInteger count = _apps.count;
+    if (count == 0) return;
+
+    for (NSUInteger idx = 0; idx < _buttons.count; idx++) {
+        UIButton *button = _buttons[idx];
+        NSInteger copy = (NSInteger)(idx / count);
+        NSInteger pos = (NSInteger)(idx % count);
+        CGFloat x = (CGFloat)copy * _copyWidth + (CGFloat)pos * _slot + (_slot - icon) / 2.0;
+        button.frame = CGRectMake(x, y, icon, icon);
+    }
+}
+
+#pragma mark - 闭环
+
+- (void)ds_normalizeOffset {
+    CGFloat copyWidth = _copyWidth;
+    if (copyWidth < 1.0) return;
+
+    CGFloat contentWidth = _scrollView.contentSize.width;
+    CGFloat maxOffset = MAX(0.0, contentWidth - _scrollView.bounds.size.width);
+    CGFloat x = _scrollView.contentOffset.x;
+
+    // 回弹阶段（负数 / 超过末尾）交给 UIScrollView 自己处理
+    if (x < 0.0 || x > maxOffset) return;
+
+    CGFloat lower = copyWidth;
+    CGFloat upper = maxOffset - copyWidth;
+    if (upper <= lower) return;   // 内容太短，保持静止（不会错位，只是不能闭环）
+
+    if (x < lower) {
+        _scrollView.contentOffset = CGPointMake(x + copyWidth, _scrollView.contentOffset.y);
+    } else if (x > upper) {
+        _scrollView.contentOffset = CGPointMake(x - copyWidth, _scrollView.contentOffset.y);
+    }
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    [self ds_normalizeOffset];
+}
+
+- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
+    [self ds_normalizeOffset];
+    [self ds_snapAnimated:YES];
+}
+
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+    if (!decelerate) [self ds_snapAnimated:YES];
+}
+
+// 松手时吸附到最近的图标槽位；先夹住范围再取整，避免把 offset 吸到内容之外
+- (void)scrollViewWillEndDragging:(UIScrollView *)scrollView
+                     withVelocity:(CGPoint)velocity
+              targetContentOffset:(inout CGPoint *)targetContentOffset {
+    if (_slot < 1.0) return;
+    CGFloat x = (*targetContentOffset).x;
+    CGFloat maxX = MAX(0.0, scrollView.contentSize.width - scrollView.bounds.size.width);
+    if (x < 0.0) x = 0.0;
+    if (x > maxX) x = maxX;
+    CGFloat snapped = round(x / _slot) * _slot;
+    if (snapped < 0.0) snapped = 0.0;
+    if (snapped > maxX) snapped = maxX;
+    (*targetContentOffset).x = snapped;
+}
+
+- (void)ds_snapAnimated:(BOOL)animated {
+    if (_slot < 1.0) return;
+    CGFloat x = _scrollView.contentOffset.x;
+    CGFloat snapped = round(x / _slot) * _slot;
+    if (fabs(snapped - x) < 0.5) return;
+    [_scrollView setContentOffset:CGPointMake(snapped, 0.0) animated:animated];
+}
+
+#pragma mark - 点击
+
+- (void)ds_iconTapped:(UIButton *)sender {
+    NSString *bid = objc_getAssociatedObject(sender, &kDSBundleIDKey);
+    if (bid.length == 0) return;
+    DSLaunchBundle(bid);
+}
+
+#pragma mark - 触摸
+
+// 只接管 Dock 区域内的触摸，其余返回 nil 让 SpringBoard 自己处理
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *view = [super hitTest:point withEvent:event];
+    return view == self ? nil : view;
+}
+
+@end

@@ -1,0 +1,9 @@
+Package: com.cz.dockscroller
+Name: Dock 轮播
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: 把 Dock 变成可左右滑动、首尾相接的闭环应用轮播。在「设置 → Dock 轮播」里勾选要放进 Dock 的应用，回到桌面即可左右滑动翻看，点图标直接打开 App。
+Maintainer: Corpse-zhao
+Author: Corpse-zhao
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 14.0)

@@ -1,0 +1,55 @@
+name: Build DockScroller
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          brew install make xz ldid
+
+      - name: Setup Theos (roothide 分支)
+        run: |
+          export THEOS=$HOME/theos
+          # ⚠️ 必须用 roothide/theos：官方 theos 没有 roothide package scheme
+          git clone --recursive https://github.com/roothide/theos.git $THEOS
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git $THEOS/sdks-tmp
+          cd $THEOS/sdks-tmp
+          git sparse-checkout set iPhoneOS14.5.sdk
+          mv iPhoneOS14.5.sdk $THEOS/sdks/
+          rm -rf $THEOS/sdks-tmp
+          ls $THEOS/sdks/
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
+
+      # Preflight 必须排在 Build 之前：编译一挂就会被 skipped，看不到自检结论
+      - name: Preflight — 静态自检
+        run: python3 tools/preflight.py
+
+      - name: Fix maintainer script permissions
+        run: |
+          if [ -d layout/DEBIAN ]; then chmod 0755 layout/DEBIAN/* || true; fi
+
+      - name: Build package
+        run: |
+          # 不要接 `| tail`：管道会吞掉退出码，scheme 报错也会显示 success
+          gmake package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1
+          ls -la packages/
+
+      - name: Inspect package
+        run: python3 tools/inspect_deb.py packages/*.deb DockScroller "Dock" "0.1.0"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DockScroller-deb
+          path: packages/*.deb
+          if-no-files-found: error
