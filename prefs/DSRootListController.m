@@ -1,14 +1,10 @@
 //
 //  DSRootListController.m
-//  设置面板根控制器（完全自绘版）
+//  设置面板根控制器
 //
-//  为什么自绘：PSListController / PSSpecifier 依赖原生「设置」代为装配的
-//  bundle 上下文；OneSettings 等收纳插件自己实例化 detail，不给这套上下文，
-//  结果就是整页空白。自绘 UITableView + UISwitch 不依赖任何私有机制，
-//  原生设置、OneSettings、任何收纳插件都能正常 push 与渲染。
-//
-//  开关直接读写 NSUserDefaults（DSPrefsCommon 同时落盘 config.plist 并发
-//  Darwin 通知），插件端 1 秒轮询内生效。
+//  设计：完全用 PSListController 自己的 table 与生命周期（这样任何环境下都不会
+//  和基类打架），只把 specifier 改成内存里手工构造 —— 不读 plist、不依赖
+//  PSBundle 上下文，因此收纳插件里也能正常出条目。
 //
 
 #import "DSRootListController.h"
@@ -16,6 +12,11 @@
 #import "DSPrefsCommon.h"
 #import "DSConfig.h"
 #import <objc/message.h>
+
+// PSCellType 的常用值（跨版本稳定）
+#define DS_CELL_GROUP   0
+#define DS_CELL_SWITCH  6
+#define DS_CELL_BUTTON  8
 
 #pragma mark - 日志查看器
 
@@ -43,222 +44,172 @@
 
 #pragma mark - 根控制器
 
-static const void *kDSActionKey = "ds_action";
-static const void *kDSKeyKey = "ds_key";
-
-@interface DSRootListController () <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, strong) UITableView *table;
-- (void)ds_ensureTable;
-- (NSString *)ds_perPageText;
-- (NSString *)ds_iconSizeText;
-- (NSString *)ds_spacingText;
-- (UISwitch *)ds_switchForKey:(NSString *)key default:(BOOL)def;
-- (void)ds_switchChanged:(UISwitch *)sender;
+@interface DSRootListController ()
+- (NSArray *)ds_buildSpecifiers;
+- (PSSpecifier *)ds_specWithLabel:(NSString *)label cell:(int)cell;
+- (PSSpecifier *)ds_groupWithTitle:(NSString *)title footer:(NSString *)footer;
+- (PSSpecifier *)ds_buttonWithTitle:(NSString *)title action:(NSString *)action;
+- (PSSpecifier *)ds_switchWithTitle:(NSString *)title key:(NSString *)key defaultValue:(BOOL)def;
+- (NSString *)ds_perPageTitle;
+- (NSString *)ds_iconSizeTitle;
+- (NSString *)ds_spacingTitle;
+- (id)ds_getSwitch:(PSSpecifier *)spec;
+- (void)ds_setSwitch:(id)value specifier:(PSSpecifier *)spec;
 - (void)ds_pickNumberForKey:(NSString *)key
                       title:(NSString *)title
                     current:(NSInteger)current
                  candidates:(NSArray<NSNumber *> *)candidates
               labelForValue:(NSString *(^)(NSInteger value))labelForValue;
+- (void)openAppPicker;
+- (void)fillAll;
+- (void)clearAll;
+- (void)pickPerPage;
+- (void)pickIconSize;
+- (void)pickSpacing;
+- (void)showLog;
+- (void)respring;
+- (void)dsReload;
+- (void)dsAlert:(NSString *)title message:(NSString *)message;
 @end
 
 @implementation DSRootListController
 
-// 完全不调 super：PSListController 会在这里创建它自己的 table 并去加载 specifiers，
-// 我们的 view 不是 table，让它跑下去只会崩或空白。
-- (void)loadView {
-    UIView *root = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 320.0, 480.0)];
-    root.backgroundColor = [UIColor systemBackgroundColor];
-    root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.view = root;
+// 这一步能在日志里留下证据：用它区分「bundle 没被加载」和「控制器崩了」
++ (void)load {
+    DSPLog(@"[设置] DockScrollerPrefs bundle 已加载 v%@", DSC_VERSION);
 }
 
-- (void)viewDidLoad {
-    // 同样不调 super：PSListController 的 viewDidLoad 会去装配它自己的 table。
-    self.title = @"Dock 轮播";
-    [self ds_ensureTable];
-    DSPLog(@"[设置] 自绘面板已加载");
+#pragma mark - specifier 构造
+
+// 用 PS 自己的工厂方法构造，target 直接指向 self
+- (PSSpecifier *)ds_specWithLabel:(NSString *)label cell:(int)cell {
+    Class cls = NSClassFromString(@"PSSpecifier");
+    if (!cls) return nil;
+
+    SEL factory = NSSelectorFromString(@"preferenceSpecifierNamed:target:set:get:detail:cell:edit:");
+    if (![cls respondsToSelector:factory]) {
+        DSPLog(@"[设置] PSSpecifier 工厂方法不可用");
+        return nil;
+    }
+
+    id (*fn)(id, SEL, NSString *, id, SEL, SEL, Class, int, Class) =
+        (id (*)(id, SEL, NSString *, id, SEL, SEL, Class, int, Class))objc_msgSend;
+    return fn((id)cls, factory, label, self, (SEL)0, (SEL)0, Nil, cell, Nil);
 }
 
-- (void)viewWillAppear:(BOOL)animated {
-    (void)animated;
-    [self ds_ensureTable];
-    [_table reloadData];   // 从子页面（应用选择）回来时刷新当前值显示
+- (PSSpecifier *)ds_groupWithTitle:(NSString *)title footer:(NSString *)footer {
+    PSSpecifier *spec = [self ds_specWithLabel:title cell:DS_CELL_GROUP];
+    if (footer.length && [spec respondsToSelector:@selector(setProperty:forKey:)]) {
+        [spec setProperty:footer forKey:@"footerText"];
+    }
+    return spec;
 }
 
-- (void)viewWillLayoutSubviews {
-    [self ds_ensureTable];
-    _table.frame = self.view.bounds;
+- (PSSpecifier *)ds_buttonWithTitle:(NSString *)title action:(NSString *)action {
+    PSSpecifier *spec = [self ds_specWithLabel:title cell:DS_CELL_BUTTON];
+    if (!spec) return nil;
+    [spec setProperty:action forKey:@"action"];
+    if ([spec respondsToSelector:@selector(setButtonAction:)]) {
+        [spec setButtonAction:NSSelectorFromString(action)];
+    }
+    if ([spec respondsToSelector:@selector(setTarget:)]) {
+        [spec setTarget:self];
+    }
+    return spec;
 }
 
-// 明确告诉基类「没有 specifier」——基类若在内部取用也不会拿到脏数据
+- (PSSpecifier *)ds_switchWithTitle:(NSString *)title key:(NSString *)key defaultValue:(BOOL)def {
+    PSSpecifier *spec = [self ds_specWithLabel:title cell:DS_CELL_SWITCH];
+    if (!spec) return nil;
+
+    [spec setProperty:key forKey:@"key"];
+    [spec setProperty:[NSNumber numberWithBool:def] forKey:@"default"];
+
+    // 读写全部走我们自己的方法，不依赖 defaults 绑定
+    if ([spec respondsToSelector:@selector(setCellTarget:)]) {
+        [spec setCellTarget:self];
+    }
+    if ([spec respondsToSelector:@selector(setCellSetter:)]) {
+        [spec setCellSetter:@selector(ds_setSwitch:specifier:)];
+    }
+    if ([spec respondsToSelector:@selector(setCellGetter:)]) {
+        [spec setCellGetter:@selector(ds_getSwitch:)];
+    }
+    return spec;
+}
+
+- (NSArray *)ds_buildSpecifiers {
+    NSMutableArray *out = [NSMutableArray array];
+
+    void (^add)(PSSpecifier *) = ^(PSSpecifier *spec) {
+        if (spec) [out addObject:spec];
+    };
+
+    add([self ds_groupWithTitle:@"总开关"
+                         footer:@"关闭后立即恢复系统原生 Dock（固定 4 个图标）。"]);
+    add([self ds_switchWithTitle:@"启用左右滑动 Dock" key:DSC_KEY_ENABLED defaultValue:YES]);
+
+    add([self ds_groupWithTitle:@"Dock 应用"
+                         footer:@"不勾选任何应用时，Dock 保持系统原本模样，插件不做任何改动。"]);
+    add([self ds_buttonWithTitle:@"选择放进 Dock 的应用" action:@"openAppPicker"]);
+    add([self ds_buttonWithTitle:@"一键填入全部应用" action:@"fillAll"]);
+    add([self ds_buttonWithTitle:@"清空列表" action:@"clearAll"]);
+
+    add([self ds_groupWithTitle:@"外观"
+                         footer:@"图标大小默认取系统 Dock 的实测值；间距选「自动」时图标在槽位内居中。"]);
+    add([self ds_buttonWithTitle:[self ds_perPageTitle] action:@"pickPerPage"]);
+    add([self ds_buttonWithTitle:[self ds_iconSizeTitle] action:@"pickIconSize"]);
+    add([self ds_buttonWithTitle:[self ds_spacingTitle] action:@"pickSpacing"]);
+
+    add([self ds_groupWithTitle:@"诊断"
+                         footer:[NSString stringWithFormat:
+                                 @"版本 %@ · 改完设置回到桌面约 1 秒内生效，无需重启桌面。", DSC_VERSION]]);
+    add([self ds_switchWithTitle:@"显示状态小横条" key:DSC_KEY_BANNER defaultValue:YES]);
+    add([self ds_buttonWithTitle:@"查看诊断日志" action:@"showLog"]);
+    add([self ds_buttonWithTitle:@"重启桌面" action:@"respring"]);
+
+    return out;
+}
+
 - (NSArray *)specifiers {
-    return @[];
-}
-
-// 基类这两个方法会去操作「它自己的 table」，而我们的 view 不是 table。
-// 接管成刷新自绘表格，避免 unrecognized selector。
-- (void)reloadSpecifiers {
-    [_table reloadData];
-}
-
-- (void)reload {
-    [_table reloadData];
-}
-
-- (void)ds_ensureTable {
-    if (_table) return;
-    _table = [[UITableView alloc] initWithFrame:self.view.bounds
-                                          style:UITableViewStyleInsetGrouped];
-    _table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _table.dataSource = self;
-    _table.delegate = self;
-    _table.backgroundColor = [UIColor systemBackgroundColor];
-    [self.view addSubview:_table];
-}
-
-#pragma mark - 表格结构
-
-//  0 总开关 | 1 Dock 应用 | 2 外观 | 3 诊断
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return 4;
-}
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    switch (section) {
-        case 0: return 1;   // 总开关只有一行
-        default: return 3;
+    if (!_specifiers) {
+        _specifiers = [self ds_buildSpecifiers];
+        DSPLog(@"[设置] 构造 specifier 完成，共 %lu 项", (unsigned long)_specifiers.count);
     }
+    return _specifiers;
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    switch (section) {
-        case 0: return @"总开关";
-        case 1: return @"Dock 应用";
-        case 2: return @"外观";
-        case 3: return @"诊断";
-    }
-    return nil;
-}
+#pragma mark - 标题（带当前值）
 
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    switch (section) {
-        case 0:
-            return @"关闭后立即恢复系统原生 Dock（固定 4 个图标）。";
-        case 1:
-            return @"不勾选任何应用时，Dock 保持系统原本模样，插件不做任何改动。";
-        case 2:
-            return @"图标大小默认取系统 Dock 的实测值，与原生完全一致；间距选「自动」时图标在槽位内居中。";
-        case 3:
-            return [NSString stringWithFormat:@"版本 %@ · 改完设置回到桌面约 1 秒内生效，无需重启桌面。",
-                    DSC_VERSION];
-    }
-    return nil;
-}
-
-#pragma mark - 行内容
-
-- (UITableViewCell *)tableView:(UITableView *)tableView
-         cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *reuse = @"DSCell";
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuse];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
-                                      reuseIdentifier:reuse];
-    }
-    cell.accessoryView = nil;
-    cell.accessoryType = UITableViewCellAccessoryNone;
-    cell.textLabel.text = nil;
-    cell.detailTextLabel.text = nil;
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    objc_setAssociatedObject(cell, kDSActionKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    NSInteger section = indexPath.section;
-    NSInteger row = indexPath.row;
-
-    if (section == 0 && row == 0) {
-        cell.textLabel.text = @"启用左右滑动 Dock";
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        cell.accessoryView = [self ds_switchForKey:DSC_KEY_ENABLED default:YES];
-    } else if (section == 1) {
-        NSArray<NSString *> *titles = @[ @"选择放进 Dock 的应用", @"一键填入全部应用", @"清空列表" ];
-        NSArray<NSString *> *actions = @[ @"openAppPicker", @"fillAll", @"clearAll" ];
-        cell.textLabel.text = titles[row];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        objc_setAssociatedObject(cell, kDSActionKey, actions[row], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else if (section == 2) {
-        NSArray<NSString *> *titles = @[ @"每页图标数", @"图标大小", @"图标间距" ];
-        NSArray<NSString *> *actions = @[ @"pickPerPage", @"pickIconSize", @"pickSpacing" ];
-        NSArray<NSString *> *values = @[ [self ds_perPageText], [self ds_iconSizeText], [self ds_spacingText] ];
-        cell.textLabel.text = titles[row];
-        cell.detailTextLabel.text = values[row];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        objc_setAssociatedObject(cell, kDSActionKey, actions[row], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else if (section == 3) {
-        if (row == 0) {
-            cell.textLabel.text = @"显示状态小横条";
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            cell.accessoryView = [self ds_switchForKey:DSC_KEY_BANNER default:YES];
-        } else {
-            cell.textLabel.text = (row == 1) ? @"查看诊断日志" : @"重启桌面";
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-            objc_setAssociatedObject(cell, kDSActionKey,
-                                     (row == 1) ? @"showLog" : @"respring",
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-    }
-    return cell;
-}
-
-#pragma mark - 交互
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    // 开关行由 UISwitch 自己处理，点击行体不做动作
-    if (indexPath.section == 0 || (indexPath.section == 3 && indexPath.row == 0)) return;
-
-    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-    NSString *action = objc_getAssociatedObject(cell, kDSActionKey);
-    if (action.length == 0) return;
-
-    SEL sel = NSSelectorFromString(action);
-    if ([self respondsToSelector:sel]) {
-        ((void (*)(id, SEL))objc_msgSend)(self, sel);
-    } else {
-        DSPLog(@"[设置] action %@ 找不到实现", action);
-    }
-}
-
-- (void)ds_switchChanged:(UISwitch *)sender {
-    NSString *key = objc_getAssociatedObject(sender, kDSKeyKey);
-    if (key.length == 0) return;
-    DSPSetBool(key, sender.on);
-}
-
-#pragma mark - 当前值文案
-
-- (NSString *)ds_perPageText {
-    return [NSString stringWithFormat:@"%ld 个",
+- (NSString *)ds_perPageTitle {
+    return [NSString stringWithFormat:@"每页图标数：%ld 个",
             (long)DSPInt(DSC_KEY_PER_PAGE, DSC_DEFAULT_PER_PAGE)];
 }
 
-- (NSString *)ds_iconSizeText {
+- (NSString *)ds_iconSizeTitle {
     NSInteger v = DSPInt(DSC_KEY_ICON_SIZE, DSC_SIZE_AUTO);
-    return (v > 0) ? [NSString stringWithFormat:@"%ld pt", (long)v] : @"跟随系统";
+    return (v > 0) ? [NSString stringWithFormat:@"图标大小：%ld pt", (long)v]
+                   : @"图标大小：跟随系统";
 }
 
-- (NSString *)ds_spacingText {
+- (NSString *)ds_spacingTitle {
     NSInteger v = DSPInt(DSC_KEY_SPACING, DSC_SIZE_AUTO);
-    return (v >= 0) ? [NSString stringWithFormat:@"%ld pt", (long)v] : @"自动";
+    return (v >= 0) ? [NSString stringWithFormat:@"图标间距：%ld pt", (long)v]
+                    : @"图标间距：自动";
 }
 
-#pragma mark - 控件工厂
+#pragma mark - 开关读写
 
-- (UISwitch *)ds_switchForKey:(NSString *)key default:(BOOL)def {
-    UISwitch *sw = [[UISwitch alloc] init];
-    sw.on = DSPBool(key, def);
-    objc_setAssociatedObject(sw, kDSKeyKey, key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [sw addTarget:self action:@selector(ds_switchChanged:) forControlEvents:UIControlEventValueChanged];
-    return sw;
+- (id)ds_getSwitch:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (key.length == 0) return @YES;
+    return [NSNumber numberWithBool:DSPBool(key, YES)];
+}
+
+- (void)ds_setSwitch:(id)value specifier:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (key.length == 0) return;
+    DSPSetBool(key, [value boolValue]);
 }
 
 #pragma mark - 动作
@@ -348,7 +299,8 @@ static const void *kDSKeyKey = "ds_key";
 - (void)pickIconSize {
     NSInteger current = DSPInt(DSC_KEY_ICON_SIZE, DSC_SIZE_AUTO);
     [self ds_pickNumberForKey:DSC_KEY_ICON_SIZE
-                        title:[NSString stringWithFormat:@"图标大小（当前 %@）", [self ds_iconSizeText]]
+                        title:[NSString stringWithFormat:@"图标大小（当前 %@）",
+                               current > 0 ? [NSString stringWithFormat:@"%ld pt", (long)current] : @"跟随系统"]
                       current:current
                    candidates:@[ @(DSC_SIZE_AUTO), @40, @44, @48, @52, @56, @60, @64, @68, @72 ]
                  labelForValue:^NSString *(NSInteger value) {
@@ -360,7 +312,8 @@ static const void *kDSKeyKey = "ds_key";
 - (void)pickSpacing {
     NSInteger current = DSPInt(DSC_KEY_SPACING, DSC_SIZE_AUTO);
     [self ds_pickNumberForKey:DSC_KEY_SPACING
-                        title:[NSString stringWithFormat:@"图标间距（当前 %@）", [self ds_spacingText]]
+                        title:[NSString stringWithFormat:@"图标间距（当前 %@）",
+                               current >= 0 ? [NSString stringWithFormat:@"%ld pt", (long)current] : @"自动"]
                       current:current
                    candidates:@[ @(DSC_SIZE_AUTO), @0, @2, @4, @6, @8, @10, @14, @18 ]
                  labelForValue:^NSString *(NSInteger value) {
@@ -400,8 +353,10 @@ static const void *kDSKeyKey = "ds_key";
 
 #pragma mark - 辅助
 
+// 重建 specifier 数组（标题里带当前值）+ 刷新表格
 - (void)dsReload {
-    [_table reloadData];
+    _specifiers = [self ds_buildSpecifiers];
+    [self reloadSpecifiers];
 }
 
 - (void)dsAlert:(NSString *)title message:(NSString *)message {

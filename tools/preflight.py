@@ -145,23 +145,31 @@ def check_panel_actions():
 
 
 def check_panel_is_selfdrawn():
-    """面板必须同时满足：
-       a) 继承真实的 PSListController —— OneSettings 会无保护地调 setSpecifier:，
-          纯 UIViewController 会被 unrecognized selector 打崩；
-       b) 不使用 specifier 机制 —— 收纳插件不装配 PSBundle 上下文，
-          loadSpecifiersFromPlistName: 找不到 plist，页面空白且不报错。
-       即：借 PS 的类壳子，界面完全自绘。"""
+    """设置面板的三条硬约束（三条都是真机崩出来的）：
+       a) 必须继承 PSListController —— OneSettings 会无保护调 setSpecifier:，
+          纯 UIViewController 直接 unrecognized selector 崩；
+       b) 不能重写 loadView —— 抢走基类的 table，基类任何回调都会把普通 UIView
+          当 UITableView 用，两种入口全崩；
+       c) 不能靠 loadSpecifiersFromPlistName: 读 plist —— 收纳插件不装配
+          PSBundle 上下文，找不到 plist，页面空白且不报错。
+       解法：用基类的 table 与生命周期，specifier 内存里手工构造。"""
     header = strip_comments(read('prefs/DSRootListController.h'))
     code = strip_comments(read('prefs/DSRootListController.m'))
 
+    problems = []
     if not re.search(r'@interface\s+DSRootListController\s*:\s*PSListController', header):
-        BAD.append('面板没有继承 PSListController —— OneSettings 调 setSpecifier: 会直接把设置打崩')
-    elif re.search(r'loadSpecifiersFromPlistName|specifierWithProperties|\[PSSpecifier', header + code):
-        BAD.append('面板仍在用 specifier 机制 —— 收纳插件环境下会整页空白，必须纯 UIKit 自绘')
-    elif 'UITableViewDataSource' not in code:
-        BAD.append('面板没有实现 UITableViewDataSource（自绘表格缺失）')
+        problems.append('面板没有继承 PSListController —— OneSettings 调 setSpecifier: 会打崩设置')
+    if re.search(r'-\s*\(void\)\s*loadView\s*\{', code):
+        problems.append('面板重写了 loadView —— 抢走基类 table 后基类回调必崩')
+    if 'loadSpecifiersFromPlistName' in code:
+        problems.append('面板用 loadSpecifiersFromPlistName: 读 plist —— 收纳插件下会空白')
+    if 'preferenceSpecifierNamed' not in code:
+        problems.append('面板没有手工构造 specifier（缺 preferenceSpecifierNamed 工厂调用）')
+
+    if problems:
+        BAD.extend(problems)
     else:
-        OK.append('面板：继承 PS 类壳子但界面自绘（原生设置与收纳插件都能显示）')
+        OK.append('面板：PS 类身份 + 基类 table + specifier 手工构造（原生与收纳都可用）')
 
 
 def check_arc_formats():
@@ -208,13 +216,14 @@ def check_no_auto_respring():
 
 
 def check_specifiers_override():
-    """面板的 specifiers 只应返回空数组（告诉基类「没有 specifier」），
-    绝不能再去 plist 里加载 —— 那是收纳插件下空白的根源。"""
+    """specifiers 必须 override 并返回手工构造的数组，否则基类拿去的是 nil/空 → 空白。"""
     code = strip_comments(read('prefs/DSRootListController.m'))
-    if 'loadSpecifiersFromPlistName' in code:
-        BAD.append('DSRootListController 还在从 plist 加载 specifiers（收纳插件环境下会空白）')
+    if not re.search(r'-\s*\(NSArray\s*\*\)\s*specifiers\s*\{', code):
+        BAD.append('DSRootListController 没 override specifiers —— 面板会整页空白')
+    elif '_specifiers' not in code:
+        BAD.append('specifiers 里没有存进 _specifiers（基类数据源取不到）')
     else:
-        OK.append('specifiers 不做 plist 加载（返回空数组，仅安抚基类）')
+        OK.append('specifiers 已 override 并手工构造（不依赖 plist）')
 
 
 def check_launch_is_async():
