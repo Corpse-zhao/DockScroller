@@ -76,20 +76,43 @@ void DSPAppsSet(NSArray<NSString *> *apps) {
     DSPLog(@"[设置] 已保存 %lu 个应用", (unsigned long)safe.count);
 }
 
-// 总开关：和插件端 DSEnabledFlag 保持完全一致的优先级
-//   prefs 域 → state 文件 → config.plist → 默认值
-// ⚠️ 不做「任一来源说关就是关」：一条通道写坏就永久关不掉也开不了。
+// 读两条 state 通道里「最后被修改」的那条。两端同一套规则（见 DSCommon.m）。
+static NSString *DSPReadState(BOOL *found) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *bestRaw = nil;
+    NSDate *bestDate = nil;
+
+    for (NSString *path in @[ DSC_STATE_FILE, DSC_STATE_FILE2 ]) {
+        NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
+        if (![attr isKindOfClass:[NSDictionary class]]) continue;
+
+        NSString *raw = [NSString stringWithContentsOfFile:path
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:NULL];
+        if (![raw isKindOfClass:[NSString class]]) continue;
+        raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (raw.length == 0) continue;
+
+        NSDate *date = attr[NSFileModificationDate];
+        if (![date isKindOfClass:[NSDate class]]) date = [NSDate distantPast];
+        if (!bestDate || [date compare:bestDate] == NSOrderedDescending) {
+            bestDate = date;
+            bestRaw = raw;
+        }
+    }
+
+    if (found) *found = (bestRaw != nil);
+    return bestRaw;
+}
+
+// 总开关：state 双通道 → prefs 域 → config.plist → 默认值
 BOOL DSPEnabledFlag(BOOL def) {
+    BOOL found = NO;
+    NSString *raw = DSPReadState(&found);
+    if (found) return [raw boolValue] || [raw isEqualToString:@"1"];
+
     id v = DSPrefsValue(DSC_KEY_ENABLED);
     if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
-
-    NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
-                                             encoding:NSUTF8StringEncoding
-                                                error:NULL];
-    if ([raw isKindOfClass:[NSString class]]) {
-        raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (raw.length > 0) return [raw boolValue] || [raw isEqualToString:@"1"];
-    }
 
     v = DSPFileConfig()[DSC_KEY_ENABLED];
     if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
@@ -97,18 +120,39 @@ BOOL DSPEnabledFlag(BOOL def) {
     return def;
 }
 
-// 给「状态自检」用：把文件原始内容原样吐出来，不做任何解释
+// 给「状态自检」用：两条通道的内容 + 修改时间，原样列出
 NSString *DSPStateRaw(void) {
-    if (![NSFileManager.defaultManager fileExistsAtPath:DSC_STATE_FILE]) return @"(文件不存在)";
-    NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
-                                             encoding:NSUTF8StringEncoding
-                                                error:NULL];
-    if (![raw isKindOfClass:[NSString class]]) return @"(读不出来)";
-    return [NSString stringWithFormat:@"\"%@\"", raw];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableString *out = [NSMutableString string];
+
+    for (NSString *path in @[ DSC_STATE_FILE, DSC_STATE_FILE2 ]) {
+        NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
+        if (![attr isKindOfClass:[NSDictionary class]]) {
+            [out appendFormat:@"  %@ → (不存在)\n", [path lastPathComponent]];
+            continue;
+        }
+        NSString *raw = [NSString stringWithContentsOfFile:path
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:NULL];
+        NSDate *date = attr[NSFileModificationDate];
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"HH:mm:ss";
+        [out appendFormat:@"  %@ → \"%@\"  %@\n",
+            [path lastPathComponent],
+            raw ? [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"(读不出)",
+            [date isKindOfClass:[NSDate class]] ? [df stringFromDate:date] : @"?"];
+    }
+    return out;
 }
 
-// 主通道写 prefs 域：CFPreferences 是 Preferences 框架自己用的接口，
-// 设置进程写它一定落盘（原生开关就这么存），跨进程读也稳。
+// 写一条通道：原子写失败（目录 meta 不可写时 rename 会被拦）再试非原子
+static BOOL DSPWriteStateFile(NSString *path, NSString *text) {
+    NSError *err = nil;
+    if ([text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err]) return YES;
+    return [text writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+}
+
+// 写总开关：两条通道都写，只要有一条落盘就够了（mtime 会保证它胜出）。
 BOOL DSPSetEnabledFlag(BOOL on) {
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm createDirectoryAtPath:DSC_CONFIG_DIR
@@ -120,38 +164,27 @@ BOOL DSPSetEnabledFlag(BOOL on) {
     [fm removeItemAtPath:@"/var/mobile/Documents/DockScroller/DISABLED" error:NULL];
     [fm removeItemAtPath:@"/var/mobile/Library/Preferences/dockscroller.disabled" error:NULL];
 
-    // ① prefs 域（主）
+    NSString *text = on ? @"1" : @"0";
+    BOOL a = DSPWriteStateFile(DSC_STATE_FILE, text);
+    BOOL b = DSPWriteStateFile(DSC_STATE_FILE2, text);
+
+    // prefs 域与 config.plist 作为第三、第四冗余（读取时排在 state 之后）
     CFPreferencesSetAppValue((__bridge CFStringRef)DSC_KEY_ENABLED,
                              on ? kCFBooleanTrue : kCFBooleanFalse,
                              (__bridge CFStringRef)DSC_DOMAIN);
     CFPreferencesAppSynchronize((__bridge CFStringRef)DSC_DOMAIN);
-
-    // ② state 文件（副，方便 Filza 查看）
-    NSString *text = on ? @"1" : @"0";
-    NSError *err = nil;
-    BOOL fileOK = [text writeToFile:DSC_STATE_FILE
-                         atomically:YES
-                           encoding:NSUTF8StringEncoding
-                              error:&err];
-    if (!fileOK) {
-        err = nil;
-        fileOK = [text writeToFile:DSC_STATE_FILE
-                        atomically:NO
-                          encoding:NSUTF8StringEncoding
-                             error:&err];
-    }
-
-    // ③ config.plist（副）
     DSPFileConfigWrite(DSC_KEY_ENABLED, @(on));
 
-    // 写完立刻回读自证
+    // 回读自证：按「最新 mtime 胜出」规则读回来必须等于想要的值
     BOOL now = DSPEnabledFlag(!on);
     BOOL verified = (now == on);
-    DSPLog(@"[设置] 写入总开关 %@ → prefs域已写 / state %@ / 回读 %@ %@",
+
+    DSPLog(@"[设置] 写入总开关 %@ → 通道A %@ / 通道B %@ / 回读 %@ %@",
            on ? @"开" : @"关",
-           fileOK ? @"成功" : @"失败",
+           a ? @"成功" : @"失败",
+           b ? @"成功" : @"失败",
            now ? @"开" : @"关",
-           verified ? @"" : (err.localizedDescription ?: @"回读不一致"));
+           verified ? @"" : @"回读不一致");
 
     if (verified) {
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),

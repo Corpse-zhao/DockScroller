@@ -137,25 +137,47 @@ id DSCValue(NSString *key) {
     return DSConfigDict()[key];
 }
 
-// 总开关：按优先级取「第一个有明确值」的来源，而不是「谁先否定谁赢」。
-//   ⚠️ 这里踩过大坑：曾经做成「任一来源说关就是关」，结果只要有一条通道
-//      写坏（比如残留的 DISABLED 标记删不掉），就永远开不了，插件等于废掉。
-//   现在的顺序：prefs 域 → state 文件 → config.plist → 默认值。
+// 读两条 state 通道里「最后被修改」的那条 —— 用 mtime 裁决，不预设优先级。
+// 这样某条通道被沙盒挡住、残留着旧值时，另一条新写的会自动胜出。
+// 返回 nil 表示两条都没有可用值。
+static NSString *DSReadState(BOOL *found) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *bestRaw = nil;
+    NSDate *bestDate = nil;
+
+    for (NSString *path in @[ DSC_STATE_FILE, DSC_STATE_FILE2 ]) {
+        NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
+        if (![attr isKindOfClass:[NSDictionary class]]) continue;
+
+        NSString *raw = [NSString stringWithContentsOfFile:path
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:NULL];
+        if (![raw isKindOfClass:[NSString class]]) continue;
+        raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (raw.length == 0) continue;
+
+        NSDate *date = attr[NSFileModificationDate];
+        if (![date isKindOfClass:[NSDate class]]) date = [NSDate distantPast];
+        if (!bestDate || [date compare:bestDate] == NSOrderedDescending) {
+            bestDate = date;
+            bestRaw = raw;
+        }
+    }
+
+    if (found) *found = (bestRaw != nil);
+    return bestRaw;
+}
+
+// 总开关：state 双通道 → prefs 域 → config.plist → 默认值。
+// ⚠️ 绝对不要再做成「任一来源说关就是关」：一条通道残留 NO 就会把开关钉死。
 BOOL DSEnabledFlag(BOOL def) {
-    // ① prefs 域（设置面板主写入路径）
+    BOOL found = NO;
+    NSString *raw = DSReadState(&found);
+    if (found) return [raw boolValue] || [raw isEqualToString:@"1"];
+
     id v = DSPrefsValue(DSC_KEY_ENABLED);
     if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
 
-    // ② state 文件（副通道，Filza 可手工改成 "1"/"0"）
-    NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
-                                             encoding:NSUTF8StringEncoding
-                                                error:NULL];
-    if ([raw isKindOfClass:[NSString class]]) {
-        raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (raw.length > 0) return [raw boolValue] || [raw isEqualToString:@"1"];
-    }
-
-    // ③ config.plist
     NSDictionary *fileDict = [NSDictionary dictionaryWithContentsOfFile:DSC_CONFIG_FILE];
     if ([fileDict isKindOfClass:[NSDictionary class]]) {
         v = fileDict[DSC_KEY_ENABLED];

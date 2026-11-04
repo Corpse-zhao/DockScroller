@@ -9,7 +9,7 @@
 #ifndef DS_CONFIG_H
 #define DS_CONFIG_H
 
-#define DSC_VERSION   @"0.1.9"
+#define DSC_VERSION   @"0.1.10"
 #define DSC_DOMAIN    @"com.cz.dockscroller"
 #define DSC_NOTIFY    "com.cz.dockscroller.reload"
 
@@ -39,10 +39,14 @@
 //    更糟的是 SpringBoard 启动时直接 return，表现为「插件完全不生效」。
 //    现在停用只有一条路：总开关（prefs 域 + state 文件），可双向读写。
 
-// 总开关的主通道是 prefs 域（Preferences 框架自己的 plist，
-// /var/mobile/Library/Preferences/com.cz.dockscroller.plist）。
-// 设置进程通过 CFPreferences 写这个域是最可靠的 —— 原生开关就是这么存的。
-// state 文件是副通道，纯文本，方便 Filza 手工查看 / 覆盖。
+// 总开关的状态存储：两条【纯文件】通道，谁最后被写过就用谁。
+//
+// 为什么不用 NSUserDefaults / cfprefsd：那层缓存会让「写了」和「落盘了」
+// 变成两件事，真机上表现为「拨开 → 退出 → 又变回关」，而且回读还能骗过自己。
+// 为什么两条：/var/mobile/Documents 和 /var/mobile/Library/Preferences 在不同
+// 越狱环境下可写性不一样，写两条只要有一条成功就够；读取时按文件修改时间裁决，
+// 不需要预设哪个优先，避免「一条通道残留旧值把另一条压死」。
 #define DSC_STATE_FILE     @"/var/mobile/Documents/DockScroller/state"
+#define DSC_STATE_FILE2    @"/var/mobile/Library/Preferences/com.cz.dockscroller.state"
 
 #endif /* DS_CONFIG_H */

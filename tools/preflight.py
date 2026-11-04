@@ -184,20 +184,19 @@ def check_switch_write_verified():
         problems.append('DSPSetEnabledFlag 写完没有回读自证')
     if 'DSPSetEnabledFlag' not in panel:
         problems.append('面板没走 state 文件写入（setPreferenceValue 里找不到 DSPSetEnabledFlag）')
-    # 拦截非前台写入，但必须是「确认离开才拦」的三态写法：
-    # 用 self.viewIfLoaded.window 判断过一次，某些容器里恒为 nil，
-    # 结果把用户的每一次拨动都丢掉了 —— 开关彻底拨不动，比不拦还糟。
-    if '_dsVisible' not in panel:
-        problems.append('面板没有拦非前台写入（后台重放旧值会把开关改掉）')
-    elif '_dsVisible == 2' not in panel:
-        problems.append('可见性判断不是「确认离开才拦」的三态写法（会把正常拨动也丢掉）')
-    if 'viewWillAppear' not in panel:
-        problems.append('没有在 viewWillAppear 里更新可见性标记')
+    # 绝不能再按「前台/后台」丢写入：这个守卫被写过两次，两次都让开关失效
+    # （v0.1.7 用 viewIfLoaded.window 恒为 nil；v0.1.8 用 viewDidDisappear 打标记）。
+    if '_dsVisible' in panel or 'viewIfLoaded.window' in panel:
+        problems.append('面板又在按前台/后台拦截写入 —— 会让开关「拨开→退出→变关」')
+    if 'viewDidDisappear' in panel:
+        problems.append('面板又在 viewDidDisappear 里改写入条件（历史回归点）')
+    if 'DSC_STATE_FILE2' not in code:
+        problems.append('总开关只写一条通道（应双通道写入，任一条成功即可）')
 
     if problems:
         BAD.extend(problems)
     else:
-        OK.append('总开关：写 state 文件 + 回读自证 + 拦截非前台写入')
+        OK.append('总开关：双通道写 + 回读自证 + 不按前台/后台丢写入')
 
 
 def check_no_editable_cell_keys():
@@ -291,44 +290,51 @@ def check_no_disabled_fuse():
 
 
 def check_enabled_priority_consistency():
-    """插件端与面板端读总开关的顺序必须一致：prefs 域 → state → config.plist。
+    """两端读总开关必须是同一套规则：state 双通道（mtime 裁决）→ prefs 域 → config。
 
-    「任一来源说关就是关」的写法被真机证伪过：一条通道写坏就永久关着。
+    「任一来源说关就是关」被真机证伪过：一条通道残留 NO 就永久锁死开关。
     """
     common = strip_comments(read('DSCommon.m'))
     prefs = strip_comments(read('prefs/DSPrefsCommon.m'))
     problems = []
 
-    def order_of(code, func):
-        # 只看开关函数体内部：文件里别处（如 DSConfigDict）也会提到这些路径，
-        # 全文 find 会误判顺序
+    def body_of(code, func):
         start = code.find(func)
         if start < 0:
-            return -1, -1, -1
+            return ''
         end = code.find('\n}\n', start)
-        body = code[start:end if end > 0 else len(code)]
-        return (body.find('DSPrefsValue('),
-                body.find('DSC_STATE_FILE'),
-                body.find('DSC_CONFIG_FILE'))
+        return code[start:end if end > 0 else len(code)]
 
-    for label, code, func in (('DSCommon.m', common, 'BOOL DSEnabledFlag('),
-                              ('DSPrefsCommon.m', prefs, 'BOOL DSPEnabledFlag(')):
-        i_pref, i_state, i_file = order_of(code, func)
-        if i_pref < 0:
-            problems.append('%s 没有读 prefs 域（主通道缺失）' % label)
-        elif i_state > 0 and i_pref > i_state:
-            problems.append('%s 里 state 文件排到了 prefs 域前面（两端顺序不一致）' % label)
-        elif i_file > 0 and i_state > 0 and i_file < i_state:
-            problems.append('%s 里 config.plist 排到了 state 前面（两端顺序不一致）' % label)
+    for label, code, func, reader in (('DSCommon.m', common, 'BOOL DSEnabledFlag(', 'DSReadState('),
+                                      ('DSPrefsCommon.m', prefs, 'BOOL DSPEnabledFlag(', 'DSPReadState(')):
+        if reader not in code:
+            problems.append('%s 没有双通道 state 读取（%s）' % (label, reader))
+            continue
+        body = body_of(code, func)
+        i_state = body.find(reader)
+        i_pref = body.find('DSPrefsValue(')
+        i_file = body.find('DSC_CONFIG_FILE')
+        if i_state < 0:
+            problems.append('%s 的开关函数没有先读 state（顺序不对）' % label)
+        elif i_pref > 0 and i_state > i_pref:
+            problems.append('%s 里 prefs 域排到了 state 前面（旧值会压住新值）' % label)
+        elif i_file > 0 and i_state > i_file:
+            problems.append('%s 里 config.plist 排到了 state 前面（顺序不对）' % label)
+
+    # mtime 裁决必须存在，否则两条通道谁优先又变成硬编码
+    for label, code in (('DSCommon.m', common), ('DSPrefsCommon.m', prefs)):
+        if 'NSFileModificationDate' not in code:
+            problems.append('%s 没有按修改时间裁决两条通道（旧值会压住新值）' % label)
 
     if problems:
         BAD.extend(problems)
     else:
-        OK.append('总开关读取顺序两端一致（prefs 域优先，不做「关优先」）')
+        OK.append('总开关两端同规则：state 双通道按 mtime 裁决 → prefs 域 → config')
 
 
 def check_panel_is_selfdrawn():
     """设置面板的三条硬约束（三条都是真机崩出来的）：
+       a) 必须继承 PSListController —— OneSettings 会无保护调 setSpecifier:，
           纯 UIViewController 直接 unrecognized selector 崩；
        b) 不能重写 loadView —— 抢走基类的 table，基类任何回调都会把普通 UIView
           当 UITableView 用，两种入口全崩；

@@ -97,12 +97,7 @@ static NSString *DSShortStack(void) {
 - (void)dsAlert:(NSString *)title message:(NSString *)message;
 @end
 
-@implementation DSRootListController {
-    // 面板可见性三态：0=还不知道（放行）1=在屏幕上 2=已离开（拦）
-    // ⚠️ 默认必须是「放行」。v0.1.7 用 self.viewIfLoaded.window 判断，
-    //    在某些容器里恒为 nil，结果把用户的每一次拨动都丢掉了 —— 开关彻底拨不动。
-    NSInteger _dsVisible;
-}
+@implementation DSRootListController
 
 // 这一步能在日志里留下证据：用它区分「bundle 没被加载」和「控制器崩了」
 + (void)load {
@@ -274,17 +269,12 @@ static NSString *DSShortStack(void) {
     NSString *key = [self ds_keyForSpec:spec];
     BOOL on = [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
 
-    // 只有「已经确认离开屏幕」时才丢弃写入。
-    // 默认（未收到过任何生命周期回调）一律放行 —— 宁可多写一次，
-    // 也不能让开关拨不动，那是功能性故障。
-    if (_dsVisible == 2) {
-        BOOL actual = DSPBool(key, YES);
-        [spec setProperty:[NSNumber numberWithBool:actual] forKey:@"value"];
-        DSPLog(@"[设置] 丢弃非前台写入 %@ = %@（实际 %@）← %@",
-               key, on ? @"开" : @"关", actual ? @"开" : @"关", DSShortStack());
-        return;
-    }
-
+    // ⚠️⚠️ 这里【不做】任何「前台/后台」判断，一行都不要加。
+    //    这个守卫被写过两次，两次都造成严重回归：
+    //    第一次用 self.viewIfLoaded.window，在收纳容器里恒为 nil → 所有拨动被丢；
+    //    第二次用 viewDidDisappear 打标记，容器不回调 viewWillAppear → 之后一直被丢。
+    //    表现都是「开关能拨、退出再进又变关」（其实根本没落盘）。
+    //    写入是否成功，交给下面的回读自证判定，不要靠猜用户在哪。
     BOOL verified = YES;
     if ([key isEqualToString:DSC_KEY_ENABLED]) {
         verified = DSPSetEnabledFlag(on);
@@ -299,10 +289,8 @@ static NSString *DSShortStack(void) {
         [self reloadSpecifiers];
         [self dsAlert:@"保存失败"
               message:[NSString stringWithFormat:
-                       @"开关没能保存，已回退。\n\n当前读回：%@\nstate 文件：%@\n\n"
-                       @"可以先用「强制停用（应急）」把插件关掉；"
-                       @"或用 Filza 把 /var/mobile/Documents/DockScroller/state "
-                       @"的内容直接改成 1 或 0。",
+                       @"开关没能保存，已回退。\n\n当前读回：%@\n\n%@\n"
+                       @"可以用 Filza 把上面任一文件的内容直接改成 1 或 0。",
                        actual ? @"开" : @"关", DSPStateRaw()]];
         return;
     }
@@ -313,12 +301,8 @@ static NSString *DSShortStack(void) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    _dsVisible = 1;
-}
-
-- (void)viewDidDisappear:(BOOL)animated {
-    [super viewDidDisappear:animated];
-    _dsVisible = 2;
+    // 每次进来都按磁盘真实值重绘一遍，避免 cell 复用了上一轮的开关状态
+    [self dsReload];
 }
 
 - (id)ds_getSwitch:(PSSpecifier *)spec {
