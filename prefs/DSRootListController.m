@@ -14,9 +14,12 @@
 #import <objc/message.h>
 
 // PSCellType 的常用值（跨版本稳定）
+// ⚠️ 8 是 PSEditTextCell（可编辑文本框），不是按钮！
+//    写成 8 的后果：面板里每个按钮都变成带光标的输入框，点不动也存不了。
+//    PSButtonCell 是 13。
 #define DS_CELL_GROUP   0
 #define DS_CELL_SWITCH  6
-#define DS_CELL_BUTTON  8
+#define DS_CELL_BUTTON  13
 
 // 调用栈摘要：只取最上面几帧，用来定位「到底是谁把开关改成了关」。
 // 之前几轮全靠猜，加上这个之后日志里就是证据。
@@ -297,9 +300,9 @@ static NSString *DSShortStack(void) {
         [self dsAlert:@"保存失败"
               message:[NSString stringWithFormat:
                        @"开关没能保存，已回退。\n\n当前读回：%@\nstate 文件：%@\n\n"
-                       @"可以先用「强制停用（应急）」把插件关掉，"
-                       @"或用 Filza 在 /var/mobile/Documents/DockScroller/ 里"
-                       @"新建空文件 DISABLED。",
+                       @"可以先用「强制停用（应急）」把插件关掉；"
+                       @"或用 Filza 把 /var/mobile/Documents/DockScroller/state "
+                       @"的内容直接改成 1 或 0。",
                        actual ? @"开" : @"关", DSPStateRaw()]];
         return;
     }
@@ -465,23 +468,23 @@ static NSString *DSShortStack(void) {
     DSPRespring();
 }
 
-// 应急出口：不管开关为什么拨不动，这里一定能把插件关掉。
-// 关的判定是「关优先」——急救标记文件、state 文件、config.plist、prefs 域，
-// 任意一条落到盘上就生效，插件端读的也是同一套规则。
+// 应急出口：不管开关为什么拨不动，这里直接按「关」写一遍全部通道。
 - (void)forceDisable {
     BOOL ok = DSPSetEnabledFlag(NO);
-    BOOL marker = [[NSFileManager defaultManager] fileExistsAtPath:DSC_DISABLED_FILE];
     [self dsReload];
 
     NSString *tail = ok ? @"已写入，重启桌面后 Dock 会恢复系统原样。"
-                        : @"写入没成功。请用 Filza 在\n/var/mobile/Documents/DockScroller/\n里新建一个空文件，命名为 DISABLED，然后重启桌面。";
+                        : @"写入没成功。请用 Filza 把\n/var/mobile/Documents/DockScroller/state\n"
+                          @"的内容改成 0（整个文件只有一个字符），然后重启桌面。";
     [self dsAlert:@"已尝试强制停用"
           message:[NSString stringWithFormat:
-                   @"急救标记：%@\nstate 文件：%@\n\n%@",
-                   marker ? @"已建立" : @"未建立", DSPStateRaw(), tail]];
+                   @"关掉的判定：%@\nstate 文件：%@\n\n%@",
+                   ok ? @"已生效" : @"未生效", DSPStateRaw(), tail]];
 }
 
-#pragma mark - 状态自检// 把「面板认为的状态」和「磁盘上真实的状态」并排摊开。
+#pragma mark - 状态自检
+
+// 把「面板认为的状态」和「磁盘上真实的状态」并排摊开。
 // 有了这一屏，就不用再靠猜：开关自己变关时，这里能直接看出是谁没落盘。
 - (void)showSelfCheck {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -511,18 +514,16 @@ static NSString *DSShortStack(void) {
         ? [NSString stringWithFormat:@"%ld pt", (long)spacing] : @"自动"];
     [report appendFormat:@"状态横条：%@\n\n", DSPBool(DSC_KEY_BANNER, YES) ? @"开" : @"关"];
 
-    [report appendFormat:@"急救标记 DISABLED：%@\n",
-        [fm fileExistsAtPath:DSC_DISABLED_FILE] ? @"存在（插件被强制停用）" : @"无"];
-
-    // 四个出口全摊开：开关拨不动时，一眼能看出是哪条路断了
+    // 各通道全摊开：开关拨不动时，一眼能看出是哪条路断了
     NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:DSC_CONFIG_FILE];
     id cfgEnabled = [cfg isKindOfClass:[NSDictionary class]] ? cfg[DSC_KEY_ENABLED] : nil;
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
-    id udEnabled = [ud objectForKey:DSC_KEY_ENABLED];
-    [report appendFormat:@"出口 config.plist enabled：%@\n",
+    CFPropertyListRef prefRaw = CFPreferencesCopyAppValue((__bridge CFStringRef)DSC_KEY_ENABLED,
+                                                          (__bridge CFStringRef)DSC_DOMAIN);
+    id prefEnabled = prefRaw ? (__bridge_transfer id)prefRaw : nil;
+    [report appendFormat:@"通道 prefs 域 enabled：%@\n",
+        prefEnabled ? [prefEnabled description] : @"(无)"];
+    [report appendFormat:@"通道 config.plist enabled：%@\n",
         cfgEnabled ? [cfgEnabled description] : @"(无)"];
-    [report appendFormat:@"出口 prefs 域 enabled：%@\n",
-        udEnabled ? [udEnabled description] : @"(无)"];
 
     NSString *logPath = DSPLogPath();
     NSDictionary *attr = logPath.length ? [fm attributesOfItemAtPath:logPath error:NULL] : nil;

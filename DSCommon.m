@@ -77,16 +77,26 @@ void DSLog(NSString *fmt, ...) {
     [handle closeFile];
 }
 
-#pragma mark - 保险丝
+#pragma mark - 保险丝（已废弃）
 
+// ⚠️ 保留函数只为兼容调用点，永远返回 NO。
+//    「文件存在就停用」这套机制会造成单点死锁：文件删不掉就永远开不了，
+//    而且 SpringBoard 启动时直接 return，真机上表现为「插件完全不生效」。
+//    停用现在只走总开关一条路。
 BOOL DSJailbreakDisabled(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:DSC_DISABLED_FILE]) return YES;
-    if ([fm fileExistsAtPath:DSC_DISABLED_FILE2]) return YES;
     return NO;
 }
 
 #pragma mark - 配置
+
+// 读 prefs 域（Preferences 框架自己的 plist）。
+// 这是设置面板与 SpringBoard 之间最可靠的一条通道 —— 原生开关存的就是这里。
+static id DSPrefsValue(NSString *key) {
+    if (key.length == 0) return nil;
+    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                    (__bridge CFStringRef)DSC_DOMAIN);
+    return v ? (__bridge_transfer id)v : nil;
+}
 
 static NSDictionary *gCfg = nil;
 static CFAbsoluteTime gCfgAt = 0.0;
@@ -127,18 +137,16 @@ id DSCValue(NSString *key) {
     return DSConfigDict()[key];
 }
 
-// 总开关的唯一权威来源：state 文件（内容 "1"/"0"）。
-// 读取顺序是「关优先」：任何一个来源说关，就是关。
-// 为什么这样设计：设置进程能不能写、写到哪里，不同越狱环境差别很大，
-// 与其赌单一通道，不如让「关」有多种表达方式 —— 只要有一条通，用户就能关掉插件。
+// 总开关：按优先级取「第一个有明确值」的来源，而不是「谁先否定谁赢」。
+//   ⚠️ 这里踩过大坑：曾经做成「任一来源说关就是关」，结果只要有一条通道
+//      写坏（比如残留的 DISABLED 标记删不掉），就永远开不了，插件等于废掉。
+//   现在的顺序：prefs 域 → state 文件 → config.plist → 默认值。
 BOOL DSEnabledFlag(BOOL def) {
-    NSFileManager *fm = [NSFileManager defaultManager];
+    // ① prefs 域（设置面板主写入路径）
+    id v = DSPrefsValue(DSC_KEY_ENABLED);
+    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
 
-    // ① 急救标记：任何进程建了这两个文件之一，一律视为关闭
-    if ([fm fileExistsAtPath:DSC_DISABLED_FILE]) return NO;
-    if ([fm fileExistsAtPath:DSC_DISABLED_FILE2]) return NO;
-
-    // ② state 文件（面板主写入路径）
+    // ② state 文件（副通道，Filza 可手工改成 "1"/"0"）
     NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
                                              encoding:NSUTF8StringEncoding
                                                 error:NULL];
@@ -150,14 +158,9 @@ BOOL DSEnabledFlag(BOOL def) {
     // ③ config.plist
     NSDictionary *fileDict = [NSDictionary dictionaryWithContentsOfFile:DSC_CONFIG_FILE];
     if ([fileDict isKindOfClass:[NSDictionary class]]) {
-        id v = fileDict[DSC_KEY_ENABLED];
+        v = fileDict[DSC_KEY_ENABLED];
         if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
     }
-
-    // ④ prefs 域
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
-    id v = [ud objectForKey:DSC_KEY_ENABLED];
-    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
 
     return def;
 }

@@ -38,8 +38,16 @@ static void DSPFileConfigWrite(NSString *key, id value) {
     [dict writeToFile:DSC_CONFIG_FILE atomically:YES];
 }
 
-NSArray<NSString *> *DSPApps(void) {
-    NSMutableArray<NSString *> *out = [NSMutableArray array];
+// 读 prefs 域（Preferences 框架自己的 plist）。设置进程写这里一定落盘，
+// 原生开关就是这么存的 —— 这是「拨开又弹回」的正解，比 NSUserDefaults 稳。
+static id DSPrefsValue(NSString *key) {
+    if (key.length == 0) return nil;
+    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                    (__bridge CFStringRef)DSC_DOMAIN);
+    return v ? (__bridge_transfer id)v : nil;
+}
+
+NSArray<NSString *> *DSPApps(void) {    NSMutableArray<NSString *> *out = [NSMutableArray array];
 
     // 同样是文件优先，理由见 DSPInt 上方注释
     id raw = DSPFileConfig()[DSC_KEY_APPS];
@@ -68,13 +76,12 @@ void DSPAppsSet(NSArray<NSString *> *apps) {
     DSPLog(@"[设置] 已保存 %lu 个应用", (unsigned long)safe.count);
 }
 
-// 总开关走独立的 state 文件（内容 "1"/"0"），与插件端完全同源。
-// 读取顺序「关优先」，和插件端 DSEnabledFlag 一字不差地对齐 —— 两边读同一套规则，
-// 才不会再出现「面板显示开、桌面是关」的错位。
+// 总开关：和插件端 DSEnabledFlag 保持完全一致的优先级
+//   prefs 域 → state 文件 → config.plist → 默认值
+// ⚠️ 不做「任一来源说关就是关」：一条通道写坏就永久关不掉也开不了。
 BOOL DSPEnabledFlag(BOOL def) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:DSC_DISABLED_FILE]) return NO;
-    if ([fm fileExistsAtPath:DSC_DISABLED_FILE2]) return NO;
+    id v = DSPrefsValue(DSC_KEY_ENABLED);
+    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
 
     NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
                                              encoding:NSUTF8StringEncoding
@@ -84,11 +91,7 @@ BOOL DSPEnabledFlag(BOOL def) {
         if (raw.length > 0) return [raw boolValue] || [raw isEqualToString:@"1"];
     }
 
-    id v = DSPFileConfig()[DSC_KEY_ENABLED];
-    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
-
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
-    v = [ud objectForKey:DSC_KEY_ENABLED];
+    v = DSPFileConfig()[DSC_KEY_ENABLED];
     if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
 
     return def;
@@ -104,9 +107,8 @@ NSString *DSPStateRaw(void) {
     return [NSString stringWithFormat:@"\"%@\"", raw];
 }
 
-// 关：先立急救标记（最硬的一条路），再尽力同步其它三个出口。
-// 开：反过来 —— 先拆急救标记，再写三个出口。
-// 只要求「有一条通」，所以 DSPSetEnabledFlag 的返回值按「关优先」规则回读判定。
+// 主通道写 prefs 域：CFPreferences 是 Preferences 框架自己用的接口，
+// 设置进程写它一定落盘（原生开关就这么存），跨进程读也稳。
 BOOL DSPSetEnabledFlag(BOOL on) {
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm createDirectoryAtPath:DSC_CONFIG_DIR
@@ -114,46 +116,40 @@ BOOL DSPSetEnabledFlag(BOOL on) {
                    attributes:nil
                         error:NULL];
 
-    if (on) {
-        [fm removeItemAtPath:DSC_DISABLED_FILE error:NULL];
-        [fm removeItemAtPath:DSC_DISABLED_FILE2 error:NULL];
-    } else {
-        // 急救标记：只要这个文件在，插件端就判定为关（见 DSCommon.m 的 DSEnabledFlag）
-        [@"1" writeToFile:DSC_DISABLED_FILE
-               atomically:NO
-                 encoding:NSUTF8StringEncoding
-                    error:NULL];
-    }
+    // 清掉旧版本留下的 DISABLED 急救标记（那套机制已废除，残留会导致永久停用）
+    [fm removeItemAtPath:@"/var/mobile/Documents/DockScroller/DISABLED" error:NULL];
+    [fm removeItemAtPath:@"/var/mobile/Library/Preferences/dockscroller.disabled" error:NULL];
 
+    // ① prefs 域（主）
+    CFPreferencesSetAppValue((__bridge CFStringRef)DSC_KEY_ENABLED,
+                             on ? kCFBooleanTrue : kCFBooleanFalse,
+                             (__bridge CFStringRef)DSC_DOMAIN);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)DSC_DOMAIN);
+
+    // ② state 文件（副，方便 Filza 查看）
     NSString *text = on ? @"1" : @"0";
     NSError *err = nil;
-    BOOL ok = [text writeToFile:DSC_STATE_FILE
-                     atomically:YES
-                       encoding:NSUTF8StringEncoding
-                          error:&err];
-    if (!ok) {
-        // atomically:YES 是「写临时文件再 rename」，目录 meta 不可写时会整条失败。
-        // 直接覆写再试一次，很多沙盒只拦 rename 不拦 write。
+    BOOL fileOK = [text writeToFile:DSC_STATE_FILE
+                         atomically:YES
+                           encoding:NSUTF8StringEncoding
+                              error:&err];
+    if (!fileOK) {
         err = nil;
-        ok = [text writeToFile:DSC_STATE_FILE
-                    atomically:NO
-                      encoding:NSUTF8StringEncoding
-                         error:&err];
+        fileOK = [text writeToFile:DSC_STATE_FILE
+                        atomically:NO
+                          encoding:NSUTF8StringEncoding
+                             error:&err];
     }
 
-    // 出口二三：config.plist 与 prefs 域，尽力而为（写不进去不影响判定）
+    // ③ config.plist（副）
     DSPFileConfigWrite(DSC_KEY_ENABLED, @(on));
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
-    [ud setBool:on forKey:DSC_KEY_ENABLED];
-    [ud synchronize];
 
-    // 写完立刻回读自证：按「关优先」规则读回来必须等于想要的值
+    // 写完立刻回读自证
     BOOL now = DSPEnabledFlag(!on);
     BOOL verified = (now == on);
-    DSPLog(@"[设置] 写入总开关 %@ → state %@ / 急救标记 %@ / 回读 %@ %@",
+    DSPLog(@"[设置] 写入总开关 %@ → prefs域已写 / state %@ / 回读 %@ %@",
            on ? @"开" : @"关",
-           ok ? @"成功" : @"失败",
-           on ? @"已清除" : @"已建立",
+           fileOK ? @"成功" : @"失败",
            now ? @"开" : @"关",
            verified ? @"" : (err.localizedDescription ?: @"回读不一致"));
 

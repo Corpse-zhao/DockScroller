@@ -245,6 +245,88 @@ def check_dock_position_memory():
         OK.append('位置记忆：重建 / 重装轮播层后回到原处（退出 App 不掉回第一页）')
 
 
+def check_cell_type_values():
+    """cellType 常量必须对得上 Preferences 的 PSCellType 枚举。
+
+    真机踩过：DS_CELL_BUTTON 写成 8，而 8 是 PSEditTextCell（可编辑文本框），
+    于是面板里每个按钮都变成带光标的输入框，点不动也存不了 ——
+    用户看到的就是「多出来一个输入光标」「功能全废」。
+    PSButtonCell = 13。
+    """
+    panel = strip_comments(read('prefs/DSRootListController.m'))
+    expect = {'DS_CELL_GROUP': 0, 'DS_CELL_SWITCH': 6, 'DS_CELL_BUTTON': 13}
+    problems = []
+    for name, want in expect.items():
+        m = re.search(r'#define\s+' + name + r'\s+(\d+)', panel)
+        if not m:
+            problems.append('找不到 %s 定义' % name)
+        elif int(m.group(1)) != want:
+            problems.append('%s = %s，应为 %d%s' % (
+                name, m.group(1), want,
+                '（8 是 PSEditTextCell，会变成带光标的输入框）' if want == 13 else ''))
+    if problems:
+        BAD.extend(problems)
+    else:
+        OK.append('cellType 数值正确（PSButtonCell=13，不会渲染成输入框）')
+
+
+def check_no_disabled_fuse():
+    """DISABLED 急救标记机制不得回归。
+
+    「文件存在 = 插件停用」是单点死锁：删不掉就永远开不了，
+    而且 SpringBoard 启动直接 return，表现为「插件完全不生效」。
+    """
+    problems = []
+    for path in ['DSCommon.m', 'prefs/DSPrefsCommon.m', 'prefs/DSRootListController.m']:
+        code = strip_comments(read(path))
+        # 只允许 postinst 里做清理（rm -f），代码里不许再读写这个标记
+        if re.search(r'fileExistsAtPath:\s*DSC_DISABLED_FILE', code):
+            problems.append('%s 仍在读 DISABLED 标记（会造成永久停用）' % path)
+    if 'define DSC_DISABLED_FILE' in read('DSConfig.h'):
+        problems.append('DSConfig.h 又把 DISABLED 宏加回来了')
+    if problems:
+        BAD.extend(problems)
+    else:
+        OK.append('无 DISABLED 单点死锁机制（停用只走总开关）')
+
+
+def check_enabled_priority_consistency():
+    """插件端与面板端读总开关的顺序必须一致：prefs 域 → state → config.plist。
+
+    「任一来源说关就是关」的写法被真机证伪过：一条通道写坏就永久关着。
+    """
+    common = strip_comments(read('DSCommon.m'))
+    prefs = strip_comments(read('prefs/DSPrefsCommon.m'))
+    problems = []
+
+    def order_of(code, func):
+        # 只看开关函数体内部：文件里别处（如 DSConfigDict）也会提到这些路径，
+        # 全文 find 会误判顺序
+        start = code.find(func)
+        if start < 0:
+            return -1, -1, -1
+        end = code.find('\n}\n', start)
+        body = code[start:end if end > 0 else len(code)]
+        return (body.find('DSPrefsValue('),
+                body.find('DSC_STATE_FILE'),
+                body.find('DSC_CONFIG_FILE'))
+
+    for label, code, func in (('DSCommon.m', common, 'BOOL DSEnabledFlag('),
+                              ('DSPrefsCommon.m', prefs, 'BOOL DSPEnabledFlag(')):
+        i_pref, i_state, i_file = order_of(code, func)
+        if i_pref < 0:
+            problems.append('%s 没有读 prefs 域（主通道缺失）' % label)
+        elif i_state > 0 and i_pref > i_state:
+            problems.append('%s 里 state 文件排到了 prefs 域前面（两端顺序不一致）' % label)
+        elif i_file > 0 and i_state > 0 and i_file < i_state:
+            problems.append('%s 里 config.plist 排到了 state 前面（两端顺序不一致）' % label)
+
+    if problems:
+        BAD.extend(problems)
+    else:
+        OK.append('总开关读取顺序两端一致（prefs 域优先，不做「关优先」）')
+
+
 def check_panel_is_selfdrawn():
     """设置面板的三条硬约束（三条都是真机崩出来的）：
           纯 UIViewController 直接 unrecognized selector 崩；
@@ -406,6 +488,9 @@ def main():
     check_switch_write_verified()
     check_hud_decoupled_from_switch()
     check_no_editable_cell_keys()
+    check_cell_type_values()
+    check_no_disabled_fuse()
+    check_enabled_priority_consistency()
     check_dock_position_memory()
     check_config_read_order()
     check_arc_formats()

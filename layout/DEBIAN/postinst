@@ -19,12 +19,19 @@ if [ ! -f "$DIR/state" ]; then
 fi
 chmod 666 "$DIR/state" 2>/dev/null || true
 
+# 清掉旧版本留下的 DISABLED 急救标记。
+# 那套「文件存在就停用」的机制已废除：文件删不掉就会永久停用，
+# 真机上表现为「插件完全不生效」，必须在这里兜底清一次。
+rm -f "$DIR/DISABLED" 2>/dev/null || true
+rm -f "/var/mobile/Library/Preferences/dockscroller.disabled" 2>/dev/null || true
+
 echo ""
 echo "Dock 轮播已安装。"
 echo "生效方式二选一："
 echo "  · 手动重启桌面（推荐，立即生效）"
 echo "  · 什么都不做，下次重启设备后自动生效"
-echo "卸载/禁用：在 $DIR 放一个名为 DISABLED 的空文件即可。"
+echo "开关插件：设置 → Dock 轮播 → 总开关（可随时开/关）"
+echo "应急关闭：把 $DIR/state 的内容改成 0，再重启桌面。"
 echo ""
 
 exit 0
