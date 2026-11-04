@@ -128,24 +128,43 @@ id DSCValue(NSString *key) {
 }
 
 // 总开关的唯一权威来源：state 文件（内容 "1"/"0"）。
-// 文件不存在 → 当作开。这样与设置面板的写入路径完全一致，不会出现
-// 「面板显示开、插件读到关」的错位。
+// 读取顺序是「关优先」：任何一个来源说关，就是关。
+// 为什么这样设计：设置进程能不能写、写到哪里，不同越狱环境差别很大，
+// 与其赌单一通道，不如让「关」有多种表达方式 —— 只要有一条通，用户就能关掉插件。
 BOOL DSEnabledFlag(BOOL def) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // ① 急救标记：任何进程建了这两个文件之一，一律视为关闭
+    if ([fm fileExistsAtPath:DSC_DISABLED_FILE]) return NO;
+    if ([fm fileExistsAtPath:DSC_DISABLED_FILE2]) return NO;
+
+    // ② state 文件（面板主写入路径）
     NSString *raw = [NSString stringWithContentsOfFile:DSC_STATE_FILE
                                              encoding:NSUTF8StringEncoding
                                                 error:NULL];
-    if (![raw isKindOfClass:[NSString class]]) return def;
-    raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (raw.length == 0) return def;
-    return [raw boolValue] || [raw isEqualToString:@"1"];
+    if ([raw isKindOfClass:[NSString class]]) {
+        raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (raw.length > 0) return [raw boolValue] || [raw isEqualToString:@"1"];
+    }
+
+    // ③ config.plist
+    NSDictionary *fileDict = [NSDictionary dictionaryWithContentsOfFile:DSC_CONFIG_FILE];
+    if ([fileDict isKindOfClass:[NSDictionary class]]) {
+        id v = fileDict[DSC_KEY_ENABLED];
+        if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
+    }
+
+    // ④ prefs 域
+    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
+    id v = [ud objectForKey:DSC_KEY_ENABLED];
+    if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
+
+    return def;
 }
 
 BOOL DSCBool(NSString *key, BOOL def) {
-    // 总开关特判：先看急救文件，再只看 state 文件
-    if ([key isEqualToString:DSC_KEY_ENABLED]) {
-        if ([NSFileManager.defaultManager fileExistsAtPath:DSC_DISABLED_FILE]) return NO;
-        return DSEnabledFlag(YES);
-    }
+    if ([key isEqualToString:DSC_KEY_ENABLED]) return DSEnabledFlag(def);
+
     id v = DSCValue(key);
     if ([v respondsToSelector:@selector(boolValue)]) return [v boolValue];
     return def;

@@ -9,7 +9,7 @@
 #ifndef DS_CONFIG_H
 #define DS_CONFIG_H
 
-#define DSC_VERSION   @"0.1.7"
+#define DSC_VERSION   @"0.1.8"
 #define DSC_DOMAIN    @"com.cz.dockscroller"
 #define DSC_NOTIFY    "com.cz.dockscroller.reload"
 

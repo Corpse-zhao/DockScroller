@@ -184,13 +184,65 @@ def check_switch_write_verified():
         problems.append('DSPSetEnabledFlag 写完没有回读自证')
     if 'DSPSetEnabledFlag' not in panel:
         problems.append('面板没走 state 文件写入（setPreferenceValue 里找不到 DSPSetEnabledFlag）')
-    if not re.search(r'viewIfLoaded\.window', panel):
-        problems.append('面板没有拦截非前台写入（后台重放旧值会把开关改掉）')
+    # 拦截非前台写入，但必须是「确认离开才拦」的三态写法：
+    # 用 self.viewIfLoaded.window 判断过一次，某些容器里恒为 nil，
+    # 结果把用户的每一次拨动都丢掉了 —— 开关彻底拨不动，比不拦还糟。
+    if '_dsVisible' not in panel:
+        problems.append('面板没有拦非前台写入（后台重放旧值会把开关改掉）')
+    elif '_dsVisible == 2' not in panel:
+        problems.append('可见性判断不是「确认离开才拦」的三态写法（会把正常拨动也丢掉）')
+    if 'viewWillAppear' not in panel:
+        problems.append('没有在 viewWillAppear 里更新可见性标记')
 
     if problems:
         BAD.extend(problems)
     else:
         OK.append('总开关：写 state 文件 + 回读自证 + 拦截非前台写入')
+
+
+def check_no_editable_cell_keys():
+    """手工构造的 specifier 不能挂「编辑框」系的键。
+
+    真机反馈「其他功能多出来一个输入光标」：给 specifier 设 cell 字符串属性、
+    或挂 cellTarget/cellSetter/cellGetter，会让框架走可编辑 cell 那条分支，
+    结果按钮变成带光标的文本框，开关也拨不动。
+    权威来源是 cellType，多余的键一律不设。
+    """
+    panel = strip_comments(read('prefs/DSRootListController.m'))
+    problems = []
+    for key in ['forKey:@"cell"', 'setCellTarget:', 'setCellSetter:', 'setCellGetter:',
+                'setSetter:', 'setGetter:']:
+        if key in panel:
+            problems.append('面板给 specifier 挂了 %s —— 会变成可编辑文本框（多出输入光标）' % key)
+    if problems:
+        BAD.extend(problems)
+    else:
+        OK.append('specifier 不挂编辑框系键（不会多出输入光标、开关可拨）')
+
+
+def check_dock_position_memory():
+    """点开 App 再退出，Dock 必须停在原地。
+
+    轮播层在转场期间会被拆掉重建，重建时若把 offset 归位到第二份开头，
+    表现为「每次退出 App 都被踢回第一页」。必须记位置 + 恢复。
+    """
+    overlay = strip_comments(read('DSDockOverlay.m'))
+    overlay_h = strip_comments(read('DSDockOverlay.h'))
+    manager = strip_comments(read('DSDockManager.m'))
+    problems = []
+    if 'ds_logicalOffset' not in overlay_h:
+        problems.append('轮播层没有暴露当前位置（ds_logicalOffset）')
+    if 'ds_restoreLogical' not in overlay_h:
+        problems.append('轮播层没有恢复入口（ds_restoreLogical）')
+    if 'ds_restoreLogical' not in overlay:
+        problems.append('重建时没有使用位置记忆')
+    if 'ds_logicalOffset' not in manager:
+        problems.append('卸载前没有保存位置（DSDockManager 里找不到 ds_logicalOffset）')
+
+    if problems:
+        BAD.extend(problems)
+    else:
+        OK.append('位置记忆：重建 / 重装轮播层后回到原处（退出 App 不掉回第一页）')
 
 
 def check_panel_is_selfdrawn():
@@ -353,6 +405,8 @@ def main():
     check_panel_specifier_enabled()
     check_switch_write_verified()
     check_hud_decoupled_from_switch()
+    check_no_editable_cell_keys()
+    check_dock_position_memory()
     check_config_read_order()
     check_arc_formats()
     check_dock_entry_point()

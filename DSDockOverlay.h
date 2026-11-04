@@ -22,4 +22,14 @@
                spacing:(CGFloat)spacing
          systemIconSize:(CGFloat)systemIconSize;
 
+// 「停在原地」用的位置记忆。
+// 用户点开 App 再退回来时，Dock 这一层会被回收重建；如果重建后把 offset
+// 归位到第二份开头，就等于每次退出 App 都被踢回第一页。
+// ds_logicalOffset ∈ [0, 一份内容的宽度)：表示当前滚到了这一份里的哪个位置。
+// 返回负值表示「当前不可滚动 / 没有位置可记」。
+- (CGFloat)ds_logicalOffset;
+
+// 重建时恢复到指定位置；传负值表示不恢复（默认）。
+@property (nonatomic, assign) CGFloat ds_restoreLogical;
+
 @end

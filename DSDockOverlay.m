@@ -46,6 +46,7 @@ static char kDSBundleIDKey;
     CGFloat _userIconSize;      // 负值 = 跟随系统
     CGFloat _userSpacing;       // 负值 = 自动
     CGFloat _systemIconSize;    // 从系统 Dock 实测到的图标边长
+    NSString *_contentKey;      // 内容指纹（应用列表 + 每页数），变了就不该沿用旧位置
 }
 
 #pragma mark - 初始化
@@ -62,6 +63,7 @@ static char kDSBundleIDKey;
     _slot = 0.0;
     _copyWidth = 1.0;
     _copies = 3;
+    _ds_restoreLogical = -1.0;
 
     _scrollView = [[UIScrollView alloc] initWithFrame:self.bounds];
     _scrollView.backgroundColor = [UIColor clearColor];
@@ -113,7 +115,25 @@ static char kDSBundleIDKey;
     return MAX(24.0, icon);
 }
 
+- (CGFloat)ds_logicalOffset {
+    if (!_scrollView.scrollEnabled) return -1.0;   // 应用数 ≤ 每页数：没有位置可记
+    if (_copyWidth < 1.0) return -1.0;
+    CGFloat x = _scrollView.contentOffset.x;
+    CGFloat logical = fmod(x, _copyWidth);
+    if (logical < 0.0) logical += _copyWidth;
+    return logical;
+}
+
 - (void)ds_rebuild {
+    // ⚠️ 位置记忆必须在这里取：重建会把 contentOffset 归位，
+    //    不先记下来就会出现「点进 App 再退出，Dock 被踢回第一页」。
+    NSString *newKey = [NSString stringWithFormat:@"%ld|%@",
+                        (long)_perPage, [_apps componentsJoinedByString:@","]];
+    BOOL sameContent = (_contentKey.length > 0 && [newKey isEqualToString:_contentKey]);
+    CGFloat keep = sameContent ? [self ds_logicalOffset] : -1.0;
+    if (keep < 0.0 && _ds_restoreLogical >= 0.0) keep = _ds_restoreLogical;
+    _contentKey = [newKey copy];
+
     [_buttons removeAllObjects];
     [_strip removeFromSuperview];
     _strip = nil;
@@ -188,10 +208,21 @@ static char kDSBundleIDKey;
     if (scrollable) {
         CGFloat maxOffset = MAX(0.0, totalWidth - width);
         CGFloat startOffset = MIN(copyWidth, MAX(0.0, maxOffset));
+
+        // 有位置记忆就放回原来的位置（仍落在第二份，左右都还有余量）
+        if (keep >= 0.0 && copyWidth > 1.0) {
+            CGFloat logical = fmod(keep, copyWidth);
+            if (logical < 0.0) logical += copyWidth;
+            startOffset = copyWidth + logical;
+        }
+        if (startOffset < 0.0) startOffset = 0.0;
+        if (startOffset > maxOffset) startOffset = maxOffset;
+
         _scrollView.contentOffset = CGPointMake(startOffset, 0.0);
     } else {
         _scrollView.contentOffset = CGPointZero;
     }
+    _ds_restoreLogical = -1.0;   // 用掉就清掉，避免影响下一次内容变更
 
     [self setNeedsLayout];
 }

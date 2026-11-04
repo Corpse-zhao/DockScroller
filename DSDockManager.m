@@ -52,6 +52,8 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
     __weak UIView *_hiddenDock;
     // 系统 Dock 里图标的真实边长（默认图标大小就取它，保证「和系统一样」）
     CGFloat _systemIconSize;
+    // 「退出 App 回到桌面还在原地」：轮播层被回收前记下滚到哪，重建时放回去
+    CGFloat _savedLogicalOffset;
 }
 
 + (instancetype)shared {
@@ -67,6 +69,7 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
     self = [super init];
     if (!self) return nil;
     _hiddenIcons = [NSMutableArray array];
+    _savedLogicalOffset = -1.0;   // 负值 = 还没记住任何位置
     return self;
 }
 
@@ -126,6 +129,7 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
     // 关掉总开关、或没勾选任何应用 → 完全回到系统原生 Dock（覆盖层、隐藏的图标全部还原）
     if (!enabled || apps.count == 0) {
         [self ds_teardown];
+        _savedLogicalOffset = -1.0;   // 内容已清空，旧位置作废
         return;
     }
 
@@ -158,6 +162,8 @@ static void DSDockConfigChanged(CFNotificationCenterRef center, void *observer, 
 
     if (!_overlay) {
         _overlay = [[DSDockOverlayView alloc] initWithFrame:frame];
+        // 新建时把上次记下的位置带上，等价于「点进 App 再退出，还在原来那一页」
+        _overlay.ds_restoreLogical = _savedLogicalOffset;
         [window addSubview:_overlay];
         DSLog(@"[Dock] 已安装轮播层：区域 %.0fx%.0f @ (%.0f, %.0f)",
               frame.size.width, frame.size.height, frame.origin.x, frame.origin.y);
@@ -390,6 +396,10 @@ static CGFloat DSProbeIconImageSize(UIView *root) {
 
 - (void)ds_teardown {
     if (_overlay) {
+        // 拆掉之前先记住滚到哪了：拆解发生在「Dock 区域异常」时（点开 App 的
+        // 转场期间就会命中），不记的话重建后必然回到第一页。
+        CGFloat logical = [_overlay ds_logicalOffset];
+        if (logical >= 0.0) _savedLogicalOffset = logical;
         [_overlay removeFromSuperview];
         _overlay = nil;
         _signature = nil;

@@ -88,12 +88,18 @@ static NSString *DSShortStack(void) {
 - (void)pickSpacing;
 - (void)showLog;
 - (void)showSelfCheck;
+- (void)forceDisable;
 - (void)respring;
 - (void)dsReload;
 - (void)dsAlert:(NSString *)title message:(NSString *)message;
 @end
 
-@implementation DSRootListController
+@implementation DSRootListController {
+    // 面板可见性三态：0=还不知道（放行）1=在屏幕上 2=已离开（拦）
+    // ⚠️ 默认必须是「放行」。v0.1.7 用 self.viewIfLoaded.window 判断，
+    //    在某些容器里恒为 nil，结果把用户的每一次拨动都丢掉了 —— 开关彻底拨不动。
+    NSInteger _dsVisible;
+}
 
 // 这一步能在日志里留下证据：用它区分「bundle 没被加载」和「控制器崩了」
 + (void)load {
@@ -122,14 +128,10 @@ static NSString *DSShortStack(void) {
     //    这是「面板出来了但全是暗的」的唯一原因。
     [spec setProperty:@YES forKey:@"enabled"];
 
-    // 再补一份 cell 字符串属性（plist 里的标准写法），和 cellType 双保险：
-    // 框架分派 cell 类时两个都可能读，缺一个就可能 fallback 成灰掉的静态样式。
-    NSString *cellName = nil;
-    if (cell == DS_CELL_GROUP) cellName = @"PSGroupCell";
-    else if (cell == DS_CELL_SWITCH) cellName = @"PSSwitchCell";
-    else if (cell == DS_CELL_BUTTON) cellName = @"PSButtonCell";
-    if (cellName) [spec setProperty:cellName forKey:@"cell"];
-
+    // ⚠️ 这里【不要】再补 cell 字符串属性（如 @"PSSwitchCell"）。
+    //    真机反馈「其他功能多出来一个输入光标」就是它干的：iOS 16 的 PSListController
+    //    会优先按这个字符串去找 cell 类，找不到就 fallback 成可编辑文本框（带光标）。
+    //    cellType 才是权威来源，够用了。
     return spec;
 }
 
@@ -167,24 +169,11 @@ static NSString *DSShortStack(void) {
     // 这里先塞一个当前真实值，避免第一帧显示成关、随后又被弹回
     [spec setProperty:[NSNumber numberWithBool:DSPBool(key, def)] forKey:@"value"];
 
-    // 再挂上自己的读写方法，双保险（不同 iOS 版本方法名不一样）
-    if ([spec respondsToSelector:@selector(setCellTarget:)]) {
-        [spec setCellTarget:self];
-    }
-    if ([spec respondsToSelector:@selector(setCellSetter:)]) {
-        [spec setCellSetter:@selector(ds_setSwitch:specifier:)];
-    }
-    if ([spec respondsToSelector:@selector(setCellGetter:)]) {
-        [spec setCellGetter:@selector(ds_getSwitch:)];
-    }
-    if ([spec respondsToSelector:NSSelectorFromString(@"setSetter:")]) {
-        ((void (*)(id, SEL, SEL))objc_msgSend)(spec, NSSelectorFromString(@"setSetter:"),
-                                              @selector(ds_setSwitch:specifier:));
-    }
-    if ([spec respondsToSelector:NSSelectorFromString(@"setGetter:")]) {
-        ((void (*)(id, SEL, SEL))objc_msgSend)(spec, NSSelectorFromString(@"setGetter:"),
-                                              @selector(ds_getSwitch:));
-    }
+    // ⚠️ 不挂 cellTarget/cellSetter/cellGetter（也不挂 setter:/getter:）。
+    //    这几个键在 Preferences 里是「可编辑 cell」用的，挂到开关上会让框架
+    //    走编辑框那条分支（真机上表现为多出一个输入光标，且开关拨不动）。
+    //    原生 plist 里的开关就只靠上面四个属性 + 本类重写的
+    //    readPreferenceValue: / setPreferenceValue:specifier:，照抄最稳。
     return spec;
 }
 
@@ -198,6 +187,7 @@ static NSString *DSShortStack(void) {
     add([self ds_groupWithTitle:@"总开关"
                          footer:@"关闭后立即恢复系统原生 Dock（固定 4 个图标）。"]);
     add([self ds_switchWithTitle:@"启用左右滑动 Dock" key:DSC_KEY_ENABLED defaultValue:YES]);
+    add([self ds_buttonWithTitle:@"强制停用（应急）" action:@"forceDisable"]);
 
     add([self ds_groupWithTitle:@"Dock 应用"
                          footer:@"不勾选任何应用时，Dock 保持系统原本模样，插件不做任何改动。"]);
@@ -281,10 +271,10 @@ static NSString *DSShortStack(void) {
     NSString *key = [self ds_keyForSpec:spec];
     BOOL on = [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
 
-    // 只有面板真的在屏幕上，拨动才算用户操作。
-    // 收纳插件 / 框架在后台重建 cell 时可能把旧值「重放」回来，
-    // 这类非前台写入会表现为「回到桌面开关自己变回关」。
-    if (!self.viewIfLoaded.window) {
+    // 只有「已经确认离开屏幕」时才丢弃写入。
+    // 默认（未收到过任何生命周期回调）一律放行 —— 宁可多写一次，
+    // 也不能让开关拨不动，那是功能性故障。
+    if (_dsVisible == 2) {
         BOOL actual = DSPBool(key, YES);
         [spec setProperty:[NSNumber numberWithBool:actual] forKey:@"value"];
         DSPLog(@"[设置] 丢弃非前台写入 %@ = %@（实际 %@）← %@",
@@ -306,15 +296,26 @@ static NSString *DSShortStack(void) {
         [self reloadSpecifiers];
         [self dsAlert:@"保存失败"
               message:[NSString stringWithFormat:
-                       @"没能写入状态文件，开关已回退。\n\n路径：%@\n当前读回：%@\n\n"
-                       @"请确认 /var/mobile/Documents/DockScroller 目录存在且可写"
-                       @"（可用 Filza 把它的权限改成 777）。",
-                       DSC_STATE_FILE, actual ? @"开" : @"关"]];
+                       @"开关没能保存，已回退。\n\n当前读回：%@\nstate 文件：%@\n\n"
+                       @"可以先用「强制停用（应急）」把插件关掉，"
+                       @"或用 Filza 在 /var/mobile/Documents/DockScroller/ 里"
+                       @"新建空文件 DISABLED。",
+                       actual ? @"开" : @"关", DSPStateRaw()]];
         return;
     }
 
     [spec setProperty:[NSNumber numberWithBool:on] forKey:@"value"];
     DSPLog(@"[设置] 写 %@ = %@ ← %@", key, on ? @"开" : @"关", DSShortStack());
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    _dsVisible = 1;
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    _dsVisible = 2;
 }
 
 - (id)ds_getSwitch:(PSSpecifier *)spec {
@@ -464,9 +465,23 @@ static NSString *DSShortStack(void) {
     DSPRespring();
 }
 
-#pragma mark - 状态自检
+// 应急出口：不管开关为什么拨不动，这里一定能把插件关掉。
+// 关的判定是「关优先」——急救标记文件、state 文件、config.plist、prefs 域，
+// 任意一条落到盘上就生效，插件端读的也是同一套规则。
+- (void)forceDisable {
+    BOOL ok = DSPSetEnabledFlag(NO);
+    BOOL marker = [[NSFileManager defaultManager] fileExistsAtPath:DSC_DISABLED_FILE];
+    [self dsReload];
 
-// 把「面板认为的状态」和「磁盘上真实的状态」并排摊开。
+    NSString *tail = ok ? @"已写入，重启桌面后 Dock 会恢复系统原样。"
+                        : @"写入没成功。请用 Filza 在\n/var/mobile/Documents/DockScroller/\n里新建一个空文件，命名为 DISABLED，然后重启桌面。";
+    [self dsAlert:@"已尝试强制停用"
+          message:[NSString stringWithFormat:
+                   @"急救标记：%@\nstate 文件：%@\n\n%@",
+                   marker ? @"已建立" : @"未建立", DSPStateRaw(), tail]];
+}
+
+#pragma mark - 状态自检// 把「面板认为的状态」和「磁盘上真实的状态」并排摊开。
 // 有了这一屏，就不用再靠猜：开关自己变关时，这里能直接看出是谁没落盘。
 - (void)showSelfCheck {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -498,6 +513,16 @@ static NSString *DSShortStack(void) {
 
     [report appendFormat:@"急救标记 DISABLED：%@\n",
         [fm fileExistsAtPath:DSC_DISABLED_FILE] ? @"存在（插件被强制停用）" : @"无"];
+
+    // 四个出口全摊开：开关拨不动时，一眼能看出是哪条路断了
+    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:DSC_CONFIG_FILE];
+    id cfgEnabled = [cfg isKindOfClass:[NSDictionary class]] ? cfg[DSC_KEY_ENABLED] : nil;
+    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:DSC_DOMAIN];
+    id udEnabled = [ud objectForKey:DSC_KEY_ENABLED];
+    [report appendFormat:@"出口 config.plist enabled：%@\n",
+        cfgEnabled ? [cfgEnabled description] : @"(无)"];
+    [report appendFormat:@"出口 prefs 域 enabled：%@\n",
+        udEnabled ? [udEnabled description] : @"(无)"];
 
     NSString *logPath = DSPLogPath();
     NSDictionary *attr = logPath.length ? [fm attributesOfItemAtPath:logPath error:NULL] : nil;
