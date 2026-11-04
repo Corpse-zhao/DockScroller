@@ -209,14 +209,19 @@ def check_no_editable_cell_keys():
     """
     panel = strip_comments(read('prefs/DSRootListController.m'))
     problems = []
-    for key in ['forKey:@"cell"', 'setCellTarget:', 'setCellSetter:', 'setCellGetter:',
-                'setSetter:', 'setGetter:']:
+    for key in ['forKey:@"cell"', 'setCellTarget:', 'setCellSetter:', 'setCellGetter:']:
         if key in panel:
             problems.append('面板给 specifier 挂了 %s —— 会变成可编辑文本框（多出输入光标）' % key)
+    # 反过来：开关必须有 getter，否则 cell 复用时会显示「构建时快照」的旧值
+    if 'setGetter:' not in panel and 'forKey:@"getter"' not in panel:
+        problems.append('开关没挂 getter —— cell 复用后显示旧状态（退出再进又变回关）')
+    # 挂了 setter 会绕过 setPreferenceValue:，写盘 + 回读自证全部失效
+    if 'setSetter:' in panel or 'forKey:@"setter"' in panel:
+        problems.append('开关挂了 setter —— 会绕过我们的写盘逻辑')
     if problems:
         BAD.extend(problems)
     else:
-        OK.append('specifier 不挂编辑框系键（不会多出输入光标、开关可拨）')
+        OK.append('specifier：不挂编辑框键、开关挂 getter 且不挂 setter')
 
 
 def check_dock_position_memory():

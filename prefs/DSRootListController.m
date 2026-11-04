@@ -73,6 +73,7 @@ static NSString *DSShortStack(void) {
 - (PSSpecifier *)ds_groupWithTitle:(NSString *)title footer:(NSString *)footer;
 - (PSSpecifier *)ds_buttonWithTitle:(NSString *)title action:(NSString *)action;
 - (PSSpecifier *)ds_switchWithTitle:(NSString *)title key:(NSString *)key defaultValue:(BOOL)def;
+- (NSString *)ds_enabledFooter;
 - (NSString *)ds_perPageTitle;
 - (NSString *)ds_iconSizeTitle;
 - (NSString *)ds_spacingTitle;
@@ -167,11 +168,20 @@ static NSString *DSShortStack(void) {
     // 这里先塞一个当前真实值，避免第一帧显示成关、随后又被弹回
     [spec setProperty:[NSNumber numberWithBool:DSPBool(key, def)] forKey:@"value"];
 
-    // ⚠️ 不挂 cellTarget/cellSetter/cellGetter（也不挂 setter:/getter:）。
-    //    这几个键在 Preferences 里是「可编辑 cell」用的，挂到开关上会让框架
-    //    走编辑框那条分支（真机上表现为多出一个输入光标，且开关拨不动）。
-    //    原生 plist 里的开关就只靠上面四个属性 + 本类重写的
-    //    readPreferenceValue: / setPreferenceValue:specifier:，照抄最稳。
+    // ⚠️ 必须挂 getter，否则 PSSwitchCell 用「构建时快照」的 value 属性渲染，
+    //    cell 被复用时就会显示上一次的旧状态（表现为「退出再进又变回关」）。
+    //    挂了 getter 之后每次刷新都会回调到 ds_getSwitch: → 实时读磁盘。
+    //
+    //    注意区分：cellTarget / cellSetter / cellGetter 是「可编辑 cell」那一套，
+    //    挂上会变成带光标的输入框（踩过）；而单纯的 getter/setter 是 PSSpecifier
+    //    的标准读写方法，原生 plist 的 get = / set = 就是它。
+    if ([spec respondsToSelector:NSSelectorFromString(@"setGetter:")]) {
+        ((void (*)(id, SEL, SEL))objc_msgSend)(spec, NSSelectorFromString(@"setGetter:"),
+                                              @selector(ds_getSwitch:));
+    }
+    // 只挂 getter，【不挂 setter】：挂了 setter 之后 PSSwitchCell 会绕过
+    // setPreferenceValue:specifier:，我们那套写盘 + 回读自证就失效了。
+
     return spec;
 }
 
@@ -182,8 +192,7 @@ static NSString *DSShortStack(void) {
         if (spec) [out addObject:spec];
     };
 
-    add([self ds_groupWithTitle:@"总开关"
-                         footer:@"关闭后立即恢复系统原生 Dock（固定 4 个图标）。"]);
+    add([self ds_groupWithTitle:@"总开关" footer:[self ds_enabledFooter]]);
     add([self ds_switchWithTitle:@"启用左右滑动 Dock" key:DSC_KEY_ENABLED defaultValue:YES]);
     add([self ds_buttonWithTitle:@"强制停用（应急）" action:@"forceDisable"]);
 
@@ -219,6 +228,16 @@ static NSString *DSShortStack(void) {
 }
 
 #pragma mark - 标题（带当前值）
+
+// 总开关组的说明文字直接显示「现在读到的值 + 两条通道的原始内容」。
+// 这一行不是装饰：开关要是再自己跳，截图就能看出到底是没写进去、
+// 还是 UI 没刷新，不用再来回试版本。
+- (NSString *)ds_enabledFooter {
+    NSString *state = DSPEnabledFlag(YES) ? @"开" : @"关";
+    return [NSString stringWithFormat:
+            @"关闭后立即恢复系统原生 Dock（固定 4 个图标）。\n"
+            @"当前读取：%@\n%@", state, DSPStateRaw()];
+}
 
 - (NSString *)ds_perPageTitle {
     return [NSString stringWithFormat:@"每页图标数：%ld 个",
@@ -302,6 +321,12 @@ static NSString *DSShortStack(void) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     // 每次进来都按磁盘真实值重绘一遍，避免 cell 复用了上一轮的开关状态
+    [self dsReload];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // 某些收纳容器只回调 didAppear，两个都来一遍最保险（dsReload 是幂等的）
     [self dsReload];
 }
 
