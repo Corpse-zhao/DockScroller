@@ -174,10 +174,10 @@ static void DSPWriteAudit(BOOL on) {
     df.dateFormat = @"HH:mm:ss";
     NSString *line = [NSString stringWithFormat:@"%@|%@|%@\n",
                       bid, on ? @"1" : @"0", [df stringFromDate:[NSDate date]]];
-    [line writeToFile:DSC_STATE_FILE2 stringByAppendingString:@".writer"
-           atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-    [line writeToFile:[DSC_CONFIG_DIR stringByAppendingPathComponent:@"state.writer"]
-           atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    NSString *auditB = [DSC_STATE_FILE2 stringByAppendingString:@".writer"];
+    NSString *auditA = [DSC_CONFIG_DIR stringByAppendingPathComponent:@"state.writer"];
+    [line writeToFile:auditB atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [line writeToFile:auditA atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 }
 
 // 写总开关：两条通道都写，只要有一条落盘就够了（mtime 会保证它胜出）。
