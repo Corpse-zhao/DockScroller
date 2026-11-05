@@ -129,7 +129,7 @@ def check_plists():
     OK.append('plist 结构与括号配平')
 
 
-PANEL_ACTIONS = ['openAppPicker', 'fillAll', 'clearAll', 'pickPerPage',
+PANEL_ACTIONS = ['openAppPicker', 'toggleEnabled', 'fillAll', 'clearAll', 'pickPerPage',
                  'pickIconSize', 'pickSpacing', 'showSelfCheck', 'showLog', 'respring']
 
 
@@ -198,6 +198,11 @@ def check_switch_write_verified():
         problems.append('缺少非对称防御（非用户触发的关写入必须被拦）')
     if 'DSPWriteAudit' not in code:
         problems.append('缺少写入审计（无法定位最后一次动开关的进程）')
+    # 总开关必须走自控的切换按钮，不再依赖 PSSwitchCell 的读写分发
+    if "ds_switchWithTitle:@\"启用左右滑动 Dock\"" in panel:
+        problems.append('总开关又改回 PSSwitchCell 了（显示与磁盘可能再次不一致）')
+    if 'ds_enabledToggleSpecifier' not in panel:
+        problems.append('总开关缺少自控切换按钮（ds_enabledToggleSpecifier）')
 
     if problems:
         BAD.extend(problems)

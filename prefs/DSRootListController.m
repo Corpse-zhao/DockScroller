@@ -93,6 +93,8 @@ static NSString *DSShortStack(void) {
 - (void)showLog;
 - (void)showSelfCheck;
 - (void)forceDisable;
+- (void)toggleEnabled;
+- (PSSpecifier *)ds_enabledToggleSpecifier;
 - (void)respring;
 - (void)dsReload;
 - (void)dsAlert:(NSString *)title message:(NSString *)message;
@@ -202,7 +204,7 @@ static NSString *DSShortStack(void) {
     };
 
     add([self ds_groupWithTitle:@"总开关" footer:[self ds_enabledFooter]]);
-    add([self ds_switchWithTitle:@"启用左右滑动 Dock" key:DSC_KEY_ENABLED defaultValue:YES]);
+    add([self ds_enabledToggleSpecifier]);
     add([self ds_buttonWithTitle:@"强制停用（应急）" action:@"forceDisable"]);
 
     add([self ds_groupWithTitle:@"Dock 应用"
@@ -246,6 +248,35 @@ static NSString *DSShortStack(void) {
     return [NSString stringWithFormat:
             @"关闭后立即恢复系统原生 Dock（固定 4 个图标）。\n"
             @"当前读取：%@\n%@", state, DSPStateRaw()];
+}
+
+// 总开关改用「切换按钮」而不是系统的 PSSwitchCell。
+// 为什么：PSSwitchCell 的读写分发在不同 iOS 版本 / 收纳容器里行为不一，
+// 我们为它打了五版补丁仍然出现「显示与磁盘不一致」。按钮的显示直接来自
+// 构建标题时的磁盘读取，写入来自点击事件 —— 两条路径都 100% 在自己手里，
+// 标题永远等于磁盘状态，不存在「拨了没落盘」或「显示旧值」的空间。
+- (PSSpecifier *)ds_enabledToggleSpecifier {
+    BOOL on = DSPEnabledFlag(YES);
+    NSString *title = on ? @"启用左右滑动 Dock：已开启（点按关闭）"
+                         : @"启用左右滑动 Dock：已关闭（点按开启）";
+    return [self ds_buttonWithTitle:title action:@"toggleEnabled"];
+}
+
+- (void)toggleEnabled {
+    BOOL on = DSPEnabledFlag(YES);
+    DSPLog(@"[设置] 用户点按总开关切换：%@ → %@", on ? @"开" : @"关", on ? @"关" : @"开");
+    BOOL verified = DSPSetEnabledFlag(!on);
+    [self dsReload];   // 标题来自磁盘，重绘后立刻反映真实状态
+
+    if (!verified) {
+        [self dsAlert:@"切换失败"
+              message:[NSString stringWithFormat:
+                       @"没能写入，当前仍是：%@\n\n%@\n"
+                       @"可用 Filza 把上面任一文件的内容直接改成 1 或 0。",
+                       DSPEnabledFlag(YES) ? @"开" : @"关", DSPStateRaw()]];
+        return;
+    }
+    // 成功不给弹窗：回到桌面 1 秒内生效，横条上能看到状态变化
 }
 
 - (NSString *)ds_perPageTitle {
