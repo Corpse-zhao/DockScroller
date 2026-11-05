@@ -206,28 +206,30 @@ def check_switch_write_verified():
 
 
 def check_no_editable_cell_keys():
-    """手工构造的 specifier 不能挂「编辑框」系的键。
+    """specifier 的读写挂载必须三套齐全，但「cell 字符串」绝不能再挂。
 
-    真机反馈「其他功能多出来一个输入光标」：给 specifier 设 cell 字符串属性、
-    或挂 cellTarget/cellSetter/cellGetter，会让框架走可编辑 cell 那条分支，
-    结果按钮变成带光标的文本框，开关也拨不动。
-    权威来源是 cellType，多余的键一律不设。
+    教训一：给 specifier 设 cell 字符串属性，会让框架按字符串找 cell 类，
+    找不到就 fallback 成可编辑文本框 —— 「多出输入光标」的真因之一。
+    教训二（v0.1.8~v0.1.12）：误把 cellTarget/cellSetter/cellGetter 当成编辑框
+    专属删掉，结果 PSSwitchCell 拨动再也不写盘 —— 「拨开又变回关、插件不生效」。
+    真凶其实是 DS_CELL_BUTTON 写成 8（PSEditTextCell）。三套读写必须挂齐。
     """
     panel = strip_comments(read('prefs/DSRootListController.m'))
     problems = []
-    for key in ['forKey:@"cell"', 'setCellTarget:', 'setCellSetter:', 'setCellGetter:']:
-        if key in panel:
-            problems.append('面板给 specifier 挂了 %s —— 会变成可编辑文本框（多出输入光标）' % key)
-    # 反过来：开关必须有 getter，否则 cell 复用时会显示「构建时快照」的旧值
-    if 'setGetter:' not in panel and 'forKey:@"getter"' not in panel:
-        problems.append('开关没挂 getter —— cell 复用后显示旧状态（退出再进又变回关）')
-    # 挂了 setter 会绕过 setPreferenceValue:，写盘 + 回读自证全部失效
-    if 'setSetter:' in panel or 'forKey:@"setter"' in panel:
-        problems.append('开关挂了 setter —— 会绕过我们的写盘逻辑')
+    if 'forKey:@"cell"' in panel:
+        problems.append('面板给 specifier 挂了 cell 字符串属性 —— 会 fallback 成可编辑文本框')
+    # 三套读写必须挂齐（不同 iOS 版本用的键不一样）
+    for key in ['setCellTarget:', 'setCellSetter:', 'setCellGetter:', 'setSetter:', 'setGetter:']:
+        if key not in panel:
+            problems.append('开关读写挂载不完整：缺 %s（缺哪套，那个版本拨动就不写盘）' % key)
+    if 'ds_setSwitch:specifier:' not in panel:
+        problems.append('cellSetter 没有指向 ds_setSwitch:specifier:')
+    if 'ds_getSwitch:' not in panel:
+        problems.append('cellGetter 没有指向 ds_getSwitch:')
     if problems:
         BAD.extend(problems)
     else:
-        OK.append('specifier：不挂编辑框键、开关挂 getter 且不挂 setter')
+        OK.append('开关读写三套挂齐（cellTarget/Setter/Getter + setter/getter）')
 
 
 def check_dock_position_memory():

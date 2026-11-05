@@ -168,19 +168,28 @@ static NSString *DSShortStack(void) {
     // 这里先塞一个当前真实值，避免第一帧显示成关、随后又被弹回
     [spec setProperty:[NSNumber numberWithBool:DSPBool(key, def)] forKey:@"value"];
 
-    // ⚠️ 必须挂 getter，否则 PSSwitchCell 用「构建时快照」的 value 属性渲染，
-    //    cell 被复用时就会显示上一次的旧状态（表现为「退出再进又变回关」）。
-    //    挂了 getter 之后每次刷新都会回调到 ds_getSwitch: → 实时读磁盘。
+    // 读写挂载 —— 【三套全挂】，不同 iOS 版本的 PSSwitchCell 用的键不一样，
+    // 缺了哪套，那个版本上拨动开关就完全不会写盘（v0.1.8~v0.1.12 的教训：
+    // 误以为 cellTarget 那组是「输入光标」的元凶删掉了，实际元凶是 cellType=8；
+    // 删掉之后拨动从未写盘，表现为「开关拨了、退出又变关、插件不生效」）。
     //
-    //    注意区分：cellTarget / cellSetter / cellGetter 是「可编辑 cell」那一套，
-    //    挂上会变成带光标的输入框（踩过）；而单纯的 getter/setter 是 PSSpecifier
-    //    的标准读写方法，原生 plist 的 get = / set = 就是它。
-    if ([spec respondsToSelector:NSSelectorFromString(@"setGetter:")]) {
-        ((void (*)(id, SEL, SEL))objc_msgSend)(spec, NSSelectorFromString(@"setGetter:"),
-                                              @selector(ds_getSwitch:));
+    // · cellTarget + cellSetter + cellGetter —— PSSwitchCell 实际使用的一组
+    // · getter —— PSSpecifier 标准读方法，保证每次刷新实时读磁盘
+    // · setter —— PSSpecifier 标准写方法，兜底另一条分发路径
+    //   （三套都指向自己的方法，内部走完整写盘 + 回读自证 + 非对称防御）
+    SEL setterSel = @selector(ds_setSwitch:specifier:);
+    SEL getterSel = @selector(ds_getSwitch:);
+
+    if ([spec respondsToSelector:@selector(setCellTarget:)]) [spec setCellTarget:self];
+    if ([spec respondsToSelector:@selector(setCellSetter:)]) [spec setCellSetter:setterSel];
+    if ([spec respondsToSelector:@selector(setCellGetter:)]) [spec setCellGetter:getterSel];
+
+    if ([spec respondsToSelector:NSSelectorFromString(@"setSetter:")]) {
+        ((void (*)(id, SEL, SEL))objc_msgSend)(spec, NSSelectorFromString(@"setSetter:"), setterSel);
     }
-    // 只挂 getter，【不挂 setter】：挂了 setter 之后 PSSwitchCell 会绕过
-    // setPreferenceValue:specifier:，我们那套写盘 + 回读自证就失效了。
+    if ([spec respondsToSelector:NSSelectorFromString(@"setGetter:")]) {
+        ((void (*)(id, SEL, SEL))objc_msgSend)(spec, NSSelectorFromString(@"setGetter:"), getterSel);
+    }
 
     return spec;
 }
@@ -361,10 +370,13 @@ static BOOL DSStackLooksLikeUserToggle(void) {
 }
 
 - (id)ds_getSwitch:(PSSpecifier *)spec {
+    // 实时读磁盘（挂了 getter 之后每次 cell 刷新都会走到这里）
     return [self readPreferenceValue:spec];
 }
 
 - (void)ds_setSwitch:(id)value specifier:(PSSpecifier *)spec {
+    // PSSwitchCell 拨动的入口之一（cellSetter / setter 都指向这里）。
+    // 与 setPreferenceValue:specifier: 走同一套完整写盘逻辑。
     [self setPreferenceValue:value specifier:spec];
 }
 
