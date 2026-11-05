@@ -284,6 +284,24 @@ static NSString *DSShortStack(void) {
     return value;
 }
 
+// 判断这次调用是不是「用户在开关上真实拨动」产生的。
+// 用户拨动的调用链一定经过开关 cell 的事件方法（switchChanged: 之类），
+// 而收纳插件 / 框架在后台重放旧值时不会经过它。
+// ⚠️ 特征串要宽：不同 iOS 版本方法名前缀不同（_switchChanged: 等），
+//    且绝不能用「栈里没有 X」做判断 —— 判错了就是把 v0.1.8 的回归再演一遍。
+static BOOL DSStackLooksLikeUserToggle(void) {
+    NSArray<NSString *> *symbols = [NSThread callStackSymbols];
+    for (NSString *frame in symbols) {
+        if ([frame containsString:@"SwitchCell"]) return YES;     // PSSwitchCell
+        if ([frame containsString:@"switchChanged"]) return YES;  // -switchChanged: / -_switchChanged:
+        if ([frame containsString:@"switchToggled"]) return YES;
+        if ([frame containsString:@"PSSwitch"]) return YES;
+        if ([frame containsString:@"PSControlTableCell"]) return YES;
+        if ([frame containsString:@"UISwitch"]) return YES;
+    }
+    return NO;
+}
+
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)spec {
     NSString *key = [self ds_keyForSpec:spec];
     BOOL on = [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
@@ -292,8 +310,20 @@ static NSString *DSShortStack(void) {
     //    这个守卫被写过两次，两次都造成严重回归：
     //    第一次用 self.viewIfLoaded.window，在收纳容器里恒为 nil → 所有拨动被丢；
     //    第二次用 viewDidDisappear 打标记，容器不回调 viewWillAppear → 之后一直被丢。
-    //    表现都是「开关能拨、退出再进又变关」（其实根本没落盘）。
     //    写入是否成功，交给下面的回读自证判定，不要靠猜用户在哪。
+    //
+    //    但「把开改成关」做【非对称防御】：只有来自用户真实拨动的调用才放行。
+    //    真机实测「退出界面开关自己变关」——写盘是成功的（没有保存失败弹窗），
+    //    说明退出后有别的代码把值改回了关；用户拨动的路径一定带开关事件特征，
+    //    后台重放没有。拦掉它，开关就稳了。
+    //    「开」的写入永远放行（重放开是无害的，拦它只会误伤）。
+    //    兜底：万一误拦，「强制停用（应急）」按钮不走这条路径，仍能关掉。
+    if ([key isEqualToString:DSC_KEY_ENABLED] && !on && !DSStackLooksLikeUserToggle()) {
+        DSPLog(@"[设置] 拦截非用户触发的关写入 ← %@", DSShortStack());
+        [spec setProperty:@YES forKey:@"value"];
+        return;
+    }
+
     BOOL verified = YES;
     if ([key isEqualToString:DSC_KEY_ENABLED]) {
         verified = DSPSetEnabledFlag(on);

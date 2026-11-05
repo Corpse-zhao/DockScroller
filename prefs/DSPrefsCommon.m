@@ -120,7 +120,7 @@ BOOL DSPEnabledFlag(BOOL def) {
     return def;
 }
 
-// 给「状态自检」用：两条通道的内容 + 修改时间，原样列出
+// 给「状态自检」用：两条通道的内容 + 修改时间 + 最后写入者，原样列出
 NSString *DSPStateRaw(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableString *out = [NSMutableString string];
@@ -142,6 +142,19 @@ NSString *DSPStateRaw(void) {
             raw ? [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"(读不出)",
             [date isKindOfClass:[NSDate class]] ? [df stringFromDate:date] : @"?"];
     }
+
+    // 最后写入者：谁最后一次动过开关（拨开关 / 后台重放都会留名）
+    for (NSString *path in @[[DSC_STATE_FILE stringByAppendingString:@".writer"],
+                             [DSC_STATE_FILE2 stringByAppendingString:@".writer"]]) {
+        NSString *raw = [NSString stringWithContentsOfFile:path
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:NULL];
+        raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (raw.length) {
+            [out appendFormat:@"  最后写入：%@", raw];
+            break;
+        }
+    }
     return out;
 }
 
@@ -150,6 +163,21 @@ static BOOL DSPWriteStateFile(NSString *path, NSString *text) {
     NSError *err = nil;
     if ([text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err]) return YES;
     return [text writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+}
+
+// 写入审计：谁是最后一个动开关的，写下来。
+// 真机上「退出界面开关自己变关」查了 N 轮都是猜，有了这一行，footer 一眼见分晓。
+static void DSPWriteAudit(BOOL on) {
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+    if (bid.length == 0) bid = @"(unknown)";
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"HH:mm:ss";
+    NSString *line = [NSString stringWithFormat:@"%@|%@|%@\n",
+                      bid, on ? @"1" : @"0", [df stringFromDate:[NSDate date]]];
+    [line writeToFile:DSC_STATE_FILE2 stringByAppendingString:@".writer"
+           atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [line writeToFile:[DSC_CONFIG_DIR stringByAppendingPathComponent:@"state.writer"]
+           atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 }
 
 // 写总开关：两条通道都写，只要有一条落盘就够了（mtime 会保证它胜出）。
@@ -167,6 +195,7 @@ BOOL DSPSetEnabledFlag(BOOL on) {
     NSString *text = on ? @"1" : @"0";
     BOOL a = DSPWriteStateFile(DSC_STATE_FILE, text);
     BOOL b = DSPWriteStateFile(DSC_STATE_FILE2, text);
+    DSPWriteAudit(on);
 
     // prefs 域与 config.plist 作为第三、第四冗余（读取时排在 state 之后）
     CFPreferencesSetAppValue((__bridge CFStringRef)DSC_KEY_ENABLED,

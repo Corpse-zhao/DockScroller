@@ -192,11 +192,17 @@ def check_switch_write_verified():
         problems.append('面板又在 viewDidDisappear 里改写入条件（历史回归点）')
     if 'DSC_STATE_FILE2' not in code:
         problems.append('总开关只写一条通道（应双通道写入，任一条成功即可）')
+    # 非对称防御：把「开」改成「关」的调用必须来自用户拨动（栈里有开关事件特征）。
+    # 真机实测「退出界面开关自己变关」——写盘成功、无弹窗，说明退出后有代码重放了关。
+    if 'DSStackLooksLikeUserToggle' not in panel:
+        problems.append('缺少非对称防御（非用户触发的关写入必须被拦）')
+    if 'DSPWriteAudit' not in code:
+        problems.append('缺少写入审计（无法定位最后一次动开关的进程）')
 
     if problems:
         BAD.extend(problems)
     else:
-        OK.append('总开关：双通道写 + 回读自证 + 不按前台/后台丢写入')
+        OK.append('总开关：双通道写 + 回读自证 + 拦截非用户的关写入 + 写入审计')
 
 
 def check_no_editable_cell_keys():
